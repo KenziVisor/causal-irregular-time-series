@@ -8,7 +8,7 @@ from typing import Dict, List, Set, Tuple
 import networkx as nx
 import numpy as np
 import pandas as pd
-from econml.dml import CausalForestDML
+from econml.dml import CausalForestDML, LinearDML
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 
 
@@ -28,10 +28,11 @@ TREATMENTS = [
     "Inflam", "NeuroFail", "CardInj", "Metab"
 ]
 
-OUTPUT_DIR = "./cate_outputs_expanded_confounders"
+OUTPUT_DIR = "./cate_outputs"
 SEED = 42
-DOWN_SAMPLE = True
+DOWN_SAMPLE = False
 USE_EXPANDED_SAFE_CONFOUNDERS = True
+MODEL_TYPE = "LinearDML"   # LinearDML or CausalForest
 
 
 # ============================================================
@@ -591,6 +592,61 @@ def choose_effect_modifiers(
 # ============================================================
 # Estimation
 # ============================================================
+def make_dml_estimator():
+    """
+    Build the estimator according to MODEL_TYPE.
+    Supported values:
+      - "CausalForest"
+      - "LinearDML"
+    """
+    if MODEL_TYPE == "CausalForest":
+        return CausalForestDML(
+            model_y=RandomForestRegressor(
+                n_estimators=300,
+                min_samples_leaf=10,
+                random_state=SEED,
+                n_jobs=-1,
+            ),
+            model_t=RandomForestClassifier(
+                n_estimators=300,
+                min_samples_leaf=10,
+                class_weight="balanced",
+                random_state=SEED,
+                n_jobs=-1,
+            ),
+            discrete_treatment=True,
+            n_estimators=400,
+            min_samples_leaf=20,
+            max_depth=10,
+            random_state=SEED,
+            n_jobs=-1,
+        )
+
+    if MODEL_TYPE == "LinearDML":
+        return LinearDML(
+            model_y=RandomForestRegressor(
+                n_estimators=300,
+                min_samples_leaf=10,
+                random_state=SEED,
+                n_jobs=-1,
+            ),
+            model_t=RandomForestClassifier(
+                n_estimators=300,
+                min_samples_leaf=10,
+                class_weight="balanced",
+                random_state=SEED,
+                n_jobs=-1,
+            ),
+            discrete_treatment=True,
+            random_state=SEED,
+        )
+
+    raise ValueError(
+        f"Unsupported MODEL_TYPE: {MODEL_TYPE}. "
+        "Use 'CausalForest' or 'LinearDML'."
+    )
+
+
 def fit_one_treatment(
     df: pd.DataFrame,
     treatment: str,
@@ -660,27 +716,7 @@ def fit_one_treatment(
     W = model_df[confounders].astype(float).to_numpy() if confounders else None
     X = model_df[effect_modifiers].astype(float).to_numpy() if effect_modifiers else None
 
-    est = CausalForestDML(
-        model_y=RandomForestRegressor(
-            n_estimators=300,
-            min_samples_leaf=10,
-            random_state=SEED,
-            n_jobs=-1,
-        ),
-        model_t=RandomForestClassifier(
-            n_estimators=300,
-            min_samples_leaf=10,
-            class_weight="balanced",
-            random_state=SEED,
-            n_jobs=-1,
-        ),
-        discrete_treatment=True,
-        n_estimators=400,
-        min_samples_leaf=20,
-        max_depth=10,
-        random_state=SEED,
-        n_jobs=-1,
-    )
+    est = make_dml_estimator()
 
     est.fit(Y=Y, T=T, X=X, W=W)
     cate = est.effect(X=X)
@@ -715,14 +751,17 @@ def fit_one_treatment(
         out["normalized_CATE_upper_95"] = np.nan
 
     formula = (
+        f"Model = {MODEL_TYPE}\n"
         f"CATE_{treatment}(x) = E[{OUTCOME_COL}(1) - {OUTCOME_COL}(0) | X=x]\n"
         f"T = {treatment}\n"
         f"Y = {OUTCOME_COL}\n"
         f"W (backdoor confounders) = {confounders if confounders else 'None'}\n"
-        f"X (effect modifiers) = {effect_modifiers if effect_modifiers else 'None'}"
+        f"X (effect modifiers) = {effect_modifiers if effect_modifiers else 'None'}\n"
+        f"Normalized CATE = CATE / outcome_rate"
     )
 
     summary = {
+        "model_type": MODEL_TYPE,
         "n": float(len(out)),
         "outcome_rate": float(model_df[OUTCOME_COL].mean()),
         "treatment_rate": float(model_df[treatment].mean()),
@@ -827,6 +866,7 @@ def write_summary_results(
 ):
     with open(path, "w", encoding="utf-8") as f:
         f.write("=== CATE Summary Results ===\n\n")
+        f.write(f"Model type: {summary['model_type']}\n")
         f.write(f"Treatment: {treatment}\n")
         f.write(f"Outcome: {OUTCOME_COL}\n\n")
 
@@ -866,6 +906,8 @@ def main():
 
     print(f"Loaded df shape: {df.shape}")
     print(f"Outcome rate before down-sampling: {df[OUTCOME_COL].mean():.4f}")
+
+    print(f"Model type: {MODEL_TYPE}")
 
     if DOWN_SAMPLE:
         df = downsample_majority_label(
@@ -941,13 +983,26 @@ def main():
             # ====================================================
             # Feature importance for CATE heterogeneity
             # ====================================================
-            if effect_modifiers:
+            if effect_modifiers and MODEL_TYPE == "CausalForest" and hasattr(est, "feature_importances_"):
                 importance_df = pd.DataFrame({
                     "variable": effect_modifiers,
                     "importance": est.feature_importances_
                 }).sort_values("importance", ascending=False)
 
                 importance_df.to_csv(feature_importance_csv, index=False)
+
+            elif effect_modifiers and MODEL_TYPE == "LinearDML":
+                # Optional: save linear final-stage coefficients if available
+                try:
+                    coef = np.ravel(est.coef_)
+                    if len(coef) == len(effect_modifiers):
+                        coef_df = pd.DataFrame({
+                            "variable": effect_modifiers,
+                            "coefficient": coef
+                        }).sort_values("coefficient", ascending=False)
+                        coef_df.to_csv(feature_importance_csv, index=False)
+                except Exception:
+                    pass
 
             cate_df.to_csv(cate_csv, index=False)
 
@@ -961,6 +1016,7 @@ def main():
             )
 
             global_summary_rows.append({
+                "model_type": summary["model_type"],
                 "treatment": treatment,
                 "n": int(summary["n"]),
                 "outcome_rate": summary["outcome_rate"],
