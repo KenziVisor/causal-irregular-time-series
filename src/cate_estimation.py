@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import os
 import pickle
 import warnings
@@ -32,7 +33,67 @@ OUTPUT_DIR = "./cate_outputs"
 SEED = 42
 DOWN_SAMPLE = False
 USE_EXPANDED_SAFE_CONFOUNDERS = True
-MODEL_TYPE = "LinearDML"   # LinearDML or CausalForest
+MODEL_TYPE = "CausalForest"   # LinearDML or CausalForest
+
+
+def str_to_bool(value: str) -> bool:
+    """
+    Parse common string forms for booleans.
+    """
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(
+        f"Invalid boolean value: {value!r}. Use true/false."
+    )
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Estimate CATEs for latent clinical treatments."
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=OUTPUT_DIR,
+        help=f"Directory for run outputs. Default: {OUTPUT_DIR}",
+    )
+    parser.add_argument(
+        "--down-sample",
+        type=str_to_bool,
+        default=DOWN_SAMPLE,
+        help=f"Whether to down-sample the majority outcome class. Default: {DOWN_SAMPLE}",
+    )
+    parser.add_argument(
+        "--use-expanded-safe-confounders",
+        type=str_to_bool,
+        default=USE_EXPANDED_SAFE_CONFOUNDERS,
+        help=(
+            "Whether to use the expanded safe confounder set instead of the minimal one. "
+            f"Default: {USE_EXPANDED_SAFE_CONFOUNDERS}"
+        ),
+    )
+    parser.add_argument(
+        "--model-type",
+        choices=["LinearDML", "CausalForest"],
+        default=MODEL_TYPE,
+        help=f"Estimator family to use. Default: {MODEL_TYPE}",
+    )
+    return parser.parse_args()
+
+def build_treatment_output_csv(
+    treatment_dir: str,
+    treatment: str,
+    suffix: str,
+) -> str:
+    return os.path.join(treatment_dir, f"{treatment}_{suffix}.csv")
+
+
+def build_run_output_csv(output_dir: str, suffix: str) -> str:
+    run_name = os.path.basename(os.path.normpath(output_dir))
+    return os.path.join(output_dir, f"{run_name}_{suffix}.csv")
+
 
 
 # ============================================================
@@ -765,6 +826,9 @@ def fit_one_treatment(
         "n": float(len(out)),
         "outcome_rate": float(model_df[OUTCOME_COL].mean()),
         "treatment_rate": float(model_df[treatment].mean()),
+        "treated_outcome_positive_rate": float(
+            ((model_df[treatment] == 1) & (model_df[OUTCOME_COL] == 1)).mean()
+        ),
         "mean_cate": float(out["CATE"].mean()),
         "std_cate": float(out["CATE"].std()),
         "min_cate": float(out["CATE"].min()),
@@ -881,6 +945,10 @@ def write_summary_results(
         f.write(f"N used by model: {int(summary['n'])}\n")
         f.write(f"Outcome positive rate: {summary['outcome_rate']:.6f}\n")
         f.write(f"Treatment positive rate: {summary['treatment_rate']:.6f}\n")
+        f.write(
+            "Treatment & outcome positive rate: "
+            f"{summary['treated_outcome_positive_rate']:.6f}\n"
+        )
         f.write(f"Mean CATE: {summary['mean_cate']:.6f}\n")
         f.write(f"Std CATE: {summary['std_cate']:.6f}\n")
         f.write(f"Min CATE: {summary['min_cate']:.6f}\n")
@@ -897,6 +965,14 @@ def write_summary_results(
 # Main loop
 # ============================================================
 def main():
+    global OUTPUT_DIR, DOWN_SAMPLE, USE_EXPANDED_SAFE_CONFOUNDERS, MODEL_TYPE
+
+    args = parse_args()
+    OUTPUT_DIR = args.output_dir
+    DOWN_SAMPLE = args.down_sample
+    USE_EXPANDED_SAFE_CONFOUNDERS = args.use_expanded_safe_confounders
+    MODEL_TYPE = args.model_type
+
     warnings.filterwarnings("ignore", category=FutureWarning)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -907,6 +983,9 @@ def main():
     print(f"Loaded df shape: {df.shape}")
     print(f"Outcome rate before down-sampling: {df[OUTCOME_COL].mean():.4f}")
 
+    print(f"Output directory: {OUTPUT_DIR}")
+    print(f"Down-sample: {DOWN_SAMPLE}")
+    print(f"Use expanded safe confounders: {USE_EXPANDED_SAFE_CONFOUNDERS}")
     print(f"Model type: {MODEL_TYPE}")
 
     if DOWN_SAMPLE:
@@ -956,14 +1035,16 @@ def main():
             "summary_results.txt"
         )
 
-        cate_csv = os.path.join(
-            treatment_dir,
-            "cate.csv"
+        cate_csv = build_treatment_output_csv(
+            treatment_dir=treatment_dir,
+            treatment=treatment,
+            suffix="cate",
         )
 
-        feature_importance_csv = os.path.join(
-            treatment_dir,
-            "feature_importance.csv"
+        feature_importance_csv = build_treatment_output_csv(
+            treatment_dir=treatment_dir,
+            treatment=treatment,
+            suffix="feature_importance",
         )
 
         write_confounder_analysis(
@@ -1021,6 +1102,7 @@ def main():
                 "n": int(summary["n"]),
                 "outcome_rate": summary["outcome_rate"],
                 "treatment_rate": summary["treatment_rate"],
+                "treated_outcome_positive_rate": summary["treated_outcome_positive_rate"],
                 "mean_cate": summary["mean_cate"],
                 "std_cate": summary["std_cate"],
                 "min_cate": summary["min_cate"],
@@ -1052,7 +1134,11 @@ def main():
             print(f"Failed for {treatment}: {e}")
             print(f"Saved failure summary: {summary_txt}")
 
-    global_summary_csv = os.path.join(OUTPUT_DIR, "global_summary.csv")
+    global_summary_csv = build_run_output_csv(OUTPUT_DIR, "global_summary")
+    manager_global_summary_csv = build_run_output_csv(
+        OUTPUT_DIR,
+        "manager_global_summary",
+    )
 
     if global_summary_rows:
         global_summary_df = pd.DataFrame(global_summary_rows)
@@ -1062,6 +1148,21 @@ def main():
         )
         global_summary_df.to_csv(global_summary_csv, index=False)
         print(f"\nSaved global summary: {global_summary_csv}")
+
+        manager_global_summary_df = global_summary_df[
+            [
+                "model_type",
+                "treatment",
+                "n",
+                "outcome_rate",
+                "treatment_rate",
+                "treated_outcome_positive_rate",
+                "mean_cate",
+                "mean_normalized_cate",
+            ]
+        ].copy()
+        manager_global_summary_df.to_csv(manager_global_summary_csv, index=False)
+        print(f"Saved manager global summary: {manager_global_summary_csv}")
 
 
 if __name__ == "__main__":
