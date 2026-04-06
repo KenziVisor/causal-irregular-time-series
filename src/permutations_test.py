@@ -21,6 +21,7 @@ CATE_ESTIMATION_SCRIPT_PATH = os.path.join(SCRIPT_DIR, "cate_estimation.py")
 # ============================================================
 # Config
 # ============================================================
+DATASET_MODEL = "physionet"
 TRIALS = 10
 EXPERIMENT_DIR = os.path.join(DATA_ROOT, "relevant_outputs", "permutations_test")
 LATENT_TAGS_PATH = os.path.join(DATA_ROOT, "latent_tags_clinical.csv")
@@ -66,6 +67,12 @@ def parse_args() -> argparse.Namespace:
             "Run treatment and outcome permutation sanity checks by repeatedly "
             "calling cate_estimation.py and aggregating run-level summaries."
         )
+    )
+    parser.add_argument(
+        "--model",
+        choices=["physionet", "mimic"],
+        default=DATASET_MODEL,
+        help=f"Dataset selector for path defaults. Default: {DATASET_MODEL}",
     )
     parser.add_argument(
         "--trials",
@@ -124,6 +131,22 @@ def parse_args() -> argparse.Namespace:
         help=f"Base seed for deterministic shuffling. Default: use SEED ({SEED}).",
     )
     return parser.parse_args()
+
+
+def get_dataset_defaults(model: str) -> Dict[str, str | None]:
+    if model == "physionet":
+        return {
+            "latent_tags_path": LATENT_TAGS_PATH,
+            "physionet_pkl_path": PHYSIONET_PKL_PATH,
+            "graph_pkl_path": GRAPH_PKL_PATH,
+        }
+    if model == "mimic":
+        return {
+            "latent_tags_path": "mimiciii_latent_tags_output/latent_tags.csv",
+            "physionet_pkl_path": "../data/processed/mimic_iii_ts_oc_ids.pkl",
+            "graph_pkl_path": None,
+        }
+    raise ValueError(f"Unsupported model: {model!r}")
 
 
 def resolve_runtime_path(
@@ -262,6 +285,21 @@ def extract_summary_metrics(summary_csv_path: str) -> pd.DataFrame:
     return summary_df
 
 
+def load_latent_tags_dataframe(latent_tags_path: str) -> pd.DataFrame:
+    latent_df = pd.read_csv(latent_tags_path)
+    if "ts_id" in latent_df.columns:
+        latent_df = latent_df.copy()
+    elif DATASET_MODEL == "mimic" and "icustay_id" in latent_df.columns:
+        latent_df = latent_df.rename(columns={"icustay_id": "ts_id"}).copy()
+    else:
+        raise ValueError(
+            "Latent tags CSV must contain 'ts_id', or contain 'icustay_id' when "
+            f"--model mimic is used. Source: {latent_tags_path}"
+        )
+    latent_df["ts_id"] = latent_df["ts_id"].astype(str)
+    return latent_df
+
+
 def run_cate_estimation_once(
     *,
     latent_tags_path: str,
@@ -279,6 +317,8 @@ def run_cate_estimation_once(
         latent_tags_path,
         "--physionet-pkl-path",
         physionet_pkl_path,
+        "--model",
+        DATASET_MODEL,
         "--graph-pkl-path",
         graph_pkl_path,
         "--output-dir",
@@ -475,9 +515,7 @@ def run_treatment_permutation_experiment(
     baseline_metrics_map: Dict[str, Dict[str, float | str]],
     baseline_treatments: Sequence[str],
 ) -> pd.DataFrame:
-    latent_df = pd.read_csv(latent_tags_path)
-    if "ts_id" not in latent_df.columns:
-        raise ValueError(f"'ts_id' column not found in latent tags CSV: {latent_tags_path}")
+    latent_df = load_latent_tags_dataframe(latent_tags_path)
 
     missing_treatment_cols = [t for t in baseline_treatments if t not in latent_df.columns]
     if missing_treatment_cols:
@@ -645,7 +683,10 @@ def run_outcome_permutation_experiment(
 
 
 def main() -> None:
+    global DATASET_MODEL
     args = parse_args()
+    DATASET_MODEL = args.model
+    dataset_defaults = get_dataset_defaults(DATASET_MODEL)
 
     trials = resolve_runtime_int(args.trials, TRIALS, "TRIALS", minimum=1)
     experiment_dir = resolve_runtime_path(
@@ -654,19 +695,24 @@ def main() -> None:
         "EXPERIMENT_DIR",
         must_exist=False,
     )
+    if DATASET_MODEL == "mimic" and args.graph_pkl_path is None:
+        raise ValueError(
+            "MIMIC mode requires --graph-pkl-path because this repo does not define "
+            "a relative default MIMIC graph pickle path."
+        )
     latent_tags_path = resolve_runtime_path(
         args.latent_tags_path,
-        LATENT_TAGS_PATH,
+        dataset_defaults["latent_tags_path"],
         "LATENT_TAGS_PATH",
     )
     physionet_pkl_path = resolve_runtime_path(
         args.physionet_pkl_path,
-        PHYSIONET_PKL_PATH,
+        dataset_defaults["physionet_pkl_path"],
         "PHYSIONET_PKL_PATH",
     )
     graph_pkl_path = resolve_runtime_path(
         args.graph_pkl_path,
-        GRAPH_PKL_PATH,
+        dataset_defaults["graph_pkl_path"],
         "GRAPH_PKL_PATH",
     )
     model_type = resolve_runtime_choice(

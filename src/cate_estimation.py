@@ -20,6 +20,7 @@ from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 # ============================================================
 # Config
 # ============================================================
+DATASET_MODEL = "physionet"
 LATENT_TAGS_PATH = "../../data/predicted_latent_tags_230326_absolute_tags.csv"
 PHYSIONET_PKL_PATH = "../../data/processed/physionet2012_ts_oc_ids.pkl"
 GRAPH_PKL_PATH = "../../data/causal_graph.pkl"
@@ -27,11 +28,16 @@ GRAPH_PKL_PATH = "../../data/causal_graph.pkl"
 OUTCOME_COL = "in_hospital_mortality"
 GRAPH_OUTCOME_NODE = "Death"
 
-# All treatment candidates from your latent tagging pipeline
-TREATMENTS = [
+PHYSIONET_TREATMENTS = [
     "Severity", "Shock", "RespFail", "RenalFail", "HepFail", "HemeFail",
     "Inflam", "NeuroFail", "CardInj", "Metab"
 ]
+MIMIC_TREATMENTS = [
+    "Severity", "Inflammation", "Shock", "RespFail", "RenalDysfunction",
+    "HepaticDysfunction", "CoagDysfunction", "NeuroDysfunction",
+    "CardiacInjury", "MetabolicDerangement",
+]
+TREATMENTS = list(PHYSIONET_TREATMENTS)
 
 OUTPUT_DIR = "../../data/relevant_outputs/cate_outputs_predicted_230326"
 SEED = 42
@@ -63,6 +69,12 @@ def str_to_bool(value: str) -> bool:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Estimate CATEs for latent clinical treatments."
+    )
+    parser.add_argument(
+        "--model",
+        choices=["physionet", "mimic"],
+        default=DATASET_MODEL,
+        help=f"Dataset selector for path defaults. Default: {DATASET_MODEL}",
     )
     parser.add_argument(
         "--latent-tags-path",
@@ -118,6 +130,26 @@ def parse_args() -> argparse.Namespace:
         help=f"Estimator family to use. Default: {MODEL_TYPE}",
     )
     return parser.parse_args()
+
+
+def get_dataset_defaults(model: str) -> Dict[str, object]:
+    if model == "physionet":
+        return {
+            "latent_tags_path": LATENT_TAGS_PATH,
+            "physionet_pkl_path": PHYSIONET_PKL_PATH,
+            "graph_pkl_path": GRAPH_PKL_PATH,
+            "graph_outcome_node": "Death",
+            "treatments": list(PHYSIONET_TREATMENTS),
+        }
+    if model == "mimic":
+        return {
+            "latent_tags_path": "mimiciii_latent_tags_output/latent_tags.csv",
+            "physionet_pkl_path": "../data/processed/mimic_iii_ts_oc_ids.pkl",
+            "graph_pkl_path": None,
+            "graph_outcome_node": "InHospitalMortality",
+            "treatments": list(MIMIC_TREATMENTS),
+        }
+    raise ValueError(f"Unsupported model: {model!r}")
 
 
 def resolve_runtime_path(
@@ -631,6 +663,15 @@ def load_analysis_dataframe(
     physionet_pkl_path: str,
 ) -> pd.DataFrame:
     latent_df = pd.read_csv(latent_tags_path)
+    if "ts_id" in latent_df.columns:
+        latent_df = latent_df.copy()
+    elif DATASET_MODEL == "mimic" and "icustay_id" in latent_df.columns:
+        latent_df = latent_df.rename(columns={"icustay_id": "ts_id"}).copy()
+    else:
+        raise ValueError(
+            "Latent tags CSV must contain 'ts_id', or contain 'icustay_id' when "
+            f"--model mimic is used. Source: {latent_tags_path}"
+        )
     latent_df["ts_id"] = latent_df["ts_id"].astype(str)
 
     ts, oc, _ = load_physionet_pickle(physionet_pkl_path)
@@ -708,7 +749,7 @@ def dataframe_columns_to_graph_nodes(
 
     Rules:
     - ICUType_1..4 in dataframe correspond to ICUType in graph
-    - in_hospital_mortality is dataframe outcome, graph node is Death -> ignore here
+    - in_hospital_mortality is the dataframe outcome -> ignore here
     - ts_id is an identifier -> ignore
     - all other columns are kept only if they are actual graph nodes
     """
@@ -1807,7 +1848,7 @@ def write_confounder_analysis(
     with open(path, "w", encoding="utf-8") as f:
         f.write("=== Confounder Analysis ===\n\n")
         f.write(f"Treatment: {treatment}\n")
-        f.write("Outcome (graph node): Death\n\n")
+        f.write(f"Outcome (graph node): {GRAPH_OUTCOME_NODE}\n\n")
 
         f.write("Method used:\n")
         f.write("- Allowed adjustment variables: latent + background/meta only\n")
@@ -2030,28 +2071,42 @@ def write_summary_results(
 # Main loop
 # ============================================================
 def main():
+    global DATASET_MODEL
     global LATENT_TAGS_PATH
     global PHYSIONET_PKL_PATH
     global GRAPH_PKL_PATH
+    global GRAPH_OUTCOME_NODE
+    global TREATMENTS
     global OUTPUT_DIR
     global DOWN_SAMPLE
     global USE_EXPANDED_SAFE_CONFOUNDERS
     global MODEL_TYPE
 
     args = parse_args()
+    DATASET_MODEL = args.model
+    dataset_defaults = get_dataset_defaults(DATASET_MODEL)
+
+    if DATASET_MODEL == "mimic" and args.graph_pkl_path is None:
+        raise ValueError(
+            "MIMIC mode requires --graph-pkl-path because this repo does not define "
+            "a relative default MIMIC graph pickle path."
+        )
+
+    GRAPH_OUTCOME_NODE = str(dataset_defaults["graph_outcome_node"])
+    TREATMENTS = list(dataset_defaults["treatments"])
     LATENT_TAGS_PATH = resolve_runtime_path(
         args.latent_tags_path,
-        LATENT_TAGS_PATH,
+        str(dataset_defaults["latent_tags_path"]),
         "LATENT_TAGS_PATH",
     )
     PHYSIONET_PKL_PATH = resolve_runtime_path(
         args.physionet_pkl_path,
-        PHYSIONET_PKL_PATH,
+        str(dataset_defaults["physionet_pkl_path"]),
         "PHYSIONET_PKL_PATH",
     )
     GRAPH_PKL_PATH = resolve_runtime_path(
         args.graph_pkl_path,
-        GRAPH_PKL_PATH,
+        dataset_defaults["graph_pkl_path"],
         "GRAPH_PKL_PATH",
     )
     OUTPUT_DIR = resolve_runtime_path(

@@ -1,10 +1,26 @@
 from __future__ import annotations
 
+import argparse
 import csv
 from pathlib import Path
 
 
+DATASET_MODEL = "physionet"
 INPUT_CSV = Path("../../data/predicted_latent_tags_230326.csv")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Split a combined predicted-latents CSV into probability and tag tables."
+    )
+    parser.add_argument(
+        "--model",
+        choices=["physionet", "mimic"],
+        default=DATASET_MODEL,
+        help=f"Dataset selector for input defaults. Default: {DATASET_MODEL}",
+    )
+    parser.add_argument("--input-csv", default=None)
+    return parser.parse_args()
 
 
 def default_output_paths(input_csv: Path) -> tuple[Path, Path]:
@@ -71,12 +87,21 @@ def split_predicted_latent_tags(
 
 
 def main() -> None:
-    if not INPUT_CSV.exists():
-        raise FileNotFoundError(f"Input CSV not found: {INPUT_CSV}")
+    args = parse_args()
+    if args.model == "mimic" and args.input_csv is None:
+        raise ValueError(
+            "MIMIC mode requires --input-csv because this repo does not define "
+            "or verify a default combined MIMIC predicted-latents CSV."
+        )
 
-    prob_output, tag_output = default_output_paths(INPUT_CSV)
+    input_csv = Path(args.input_csv) if args.input_csv is not None else INPUT_CSV
+
+    if not input_csv.exists():
+        raise FileNotFoundError(f"Input CSV not found: {input_csv}")
+
+    prob_output, tag_output = default_output_paths(input_csv)
     prob_columns, tag_columns = split_predicted_latent_tags(
-        input_csv=INPUT_CSV,
+        input_csv=input_csv,
         prob_output=prob_output,
         tag_output=tag_output,
     )

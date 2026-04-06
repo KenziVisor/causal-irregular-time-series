@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import os
 import pickle
 import warnings
@@ -13,6 +14,7 @@ import pandas as pd
 # ============================================================
 # Config
 # ============================================================
+DATASET_MODEL = "physionet"
 LATENT_TAGS_PATH = "../../data/latent_tags.csv"
 PHYSIONET_PKL_PATH = "../../data/processed/physionet2012_ts_oc_ids.pkl"
 GRAPH_PKL_PATH = "../../data/causal_graph.pkl"
@@ -20,10 +22,16 @@ GRAPH_PKL_PATH = "../../data/causal_graph.pkl"
 OUTCOME_COL = "in_hospital_mortality"
 GRAPH_OUTCOME_NODE = "Death"
 
-TREATMENTS = [
+PHYSIONET_TREATMENTS = [
     "Severity", "Shock", "RespFail", "RenalFail", "HepFail", "HemeFail",
     "Inflam", "NeuroFail", "CardInj", "Metab"
 ]
+MIMIC_TREATMENTS = [
+    "Severity", "Inflammation", "Shock", "RespFail", "RenalDysfunction",
+    "HepaticDysfunction", "CoagDysfunction", "NeuroDysfunction",
+    "CardiacInjury", "MetabolicDerangement",
+]
+TREATMENTS = list(PHYSIONET_TREATMENTS)
 
 OUTPUT_DIR = "./matching_outputs"
 SEED = 42
@@ -39,6 +47,74 @@ MATCH_WITH_REPLACEMENT = False
 # Optional: keep only binary/categorical confounders for Hamming matching.
 # If False, numeric variables are binarized / discretized automatically.
 REQUIRE_BINARY_CONF = False
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Estimate matched-pair causal effects for latent clinical treatments."
+    )
+    parser.add_argument(
+        "--model",
+        choices=["physionet", "mimic"],
+        default=DATASET_MODEL,
+        help=f"Dataset selector for path defaults. Default: {DATASET_MODEL}",
+    )
+    parser.add_argument("--latent-tags-path", default=None)
+    parser.add_argument("--physionet-pkl-path", default=None)
+    parser.add_argument("--graph-pkl-path", default=None)
+    parser.add_argument("--output-dir", default=None)
+    return parser.parse_args()
+
+
+def get_dataset_defaults(model: str) -> Dict[str, object]:
+    if model == "physionet":
+        return {
+            "latent_tags_path": LATENT_TAGS_PATH,
+            "physionet_pkl_path": PHYSIONET_PKL_PATH,
+            "graph_pkl_path": GRAPH_PKL_PATH,
+            "graph_outcome_node": "Death",
+            "treatments": list(PHYSIONET_TREATMENTS),
+        }
+    if model == "mimic":
+        return {
+            "latent_tags_path": "mimiciii_latent_tags_output/latent_tags.csv",
+            "physionet_pkl_path": "../data/processed/mimic_iii_ts_oc_ids.pkl",
+            "graph_pkl_path": None,
+            "graph_outcome_node": "InHospitalMortality",
+            "treatments": list(MIMIC_TREATMENTS),
+        }
+    raise ValueError(f"Unsupported model: {model!r}")
+
+
+def resolve_runtime_path(
+    cli_value: str | None,
+    default_value: str | None,
+    field_name: str,
+    *,
+    must_exist: bool = True,
+) -> str:
+    raw_value = cli_value if cli_value is not None else default_value
+    if raw_value is None:
+        raise ValueError(
+            f"{field_name} is not configured. Provide the matching CLI flag."
+        )
+
+    raw_value = raw_value.strip()
+    if not raw_value:
+        raise ValueError(f"{field_name} is empty. Provide a non-empty path.")
+
+    resolved_path = os.path.abspath(os.path.expanduser(raw_value))
+    if must_exist:
+        if not os.path.exists(resolved_path):
+            raise FileNotFoundError(f"{field_name} does not exist: {resolved_path}")
+        if not os.path.isfile(resolved_path):
+            raise FileNotFoundError(f"{field_name} is not a file: {resolved_path}")
+    elif os.path.exists(resolved_path) and not os.path.isdir(resolved_path):
+        raise NotADirectoryError(
+            f"{field_name} must be a directory path: {resolved_path}"
+        )
+
+    return resolved_path
 
 
 # ============================================================
@@ -90,6 +166,15 @@ def load_analysis_dataframe(
     physionet_pkl_path: str,
 ) -> pd.DataFrame:
     latent_df = pd.read_csv(latent_tags_path)
+    if "ts_id" in latent_df.columns:
+        latent_df = latent_df.copy()
+    elif DATASET_MODEL == "mimic" and "icustay_id" in latent_df.columns:
+        latent_df = latent_df.rename(columns={"icustay_id": "ts_id"}).copy()
+    else:
+        raise ValueError(
+            "Latent tags CSV must contain 'ts_id', or contain 'icustay_id' when "
+            f"--model mimic is used. Source: {latent_tags_path}"
+        )
     latent_df["ts_id"] = latent_df["ts_id"].astype(str)
 
     ts, oc, _ = load_physionet_pickle(physionet_pkl_path)
@@ -837,8 +922,48 @@ def write_matching_summary(
 # Main loop
 # ============================================================
 def main():
+    global DATASET_MODEL
+    global LATENT_TAGS_PATH
+    global PHYSIONET_PKL_PATH
+    global GRAPH_PKL_PATH
+    global GRAPH_OUTCOME_NODE
+    global TREATMENTS
+    global OUTPUT_DIR
     warnings.filterwarnings("ignore", category=FutureWarning)
     np.random.seed(SEED)
+    args = parse_args()
+    DATASET_MODEL = args.model
+    dataset_defaults = get_dataset_defaults(DATASET_MODEL)
+
+    if DATASET_MODEL == "mimic" and args.graph_pkl_path is None:
+        raise ValueError(
+            "MIMIC mode requires --graph-pkl-path because this repo does not define "
+            "a relative default MIMIC graph pickle path."
+        )
+
+    GRAPH_OUTCOME_NODE = str(dataset_defaults["graph_outcome_node"])
+    TREATMENTS = list(dataset_defaults["treatments"])
+    LATENT_TAGS_PATH = resolve_runtime_path(
+        args.latent_tags_path,
+        str(dataset_defaults["latent_tags_path"]),
+        "LATENT_TAGS_PATH",
+    )
+    PHYSIONET_PKL_PATH = resolve_runtime_path(
+        args.physionet_pkl_path,
+        str(dataset_defaults["physionet_pkl_path"]),
+        "PHYSIONET_PKL_PATH",
+    )
+    GRAPH_PKL_PATH = resolve_runtime_path(
+        args.graph_pkl_path,
+        dataset_defaults["graph_pkl_path"],
+        "GRAPH_PKL_PATH",
+    )
+    OUTPUT_DIR = resolve_runtime_path(
+        args.output_dir,
+        OUTPUT_DIR,
+        "OUTPUT_DIR",
+        must_exist=False,
+    )
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     print("Loading dataframe and graph...")

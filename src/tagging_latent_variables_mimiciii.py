@@ -1,0 +1,1068 @@
+
+"""
+tagging_latent_variables_mimiciii.py
+
+Rule-based latent variable tagging for MIMIC-III ICU stays.
+
+What this script does
+---------------------
+1. Loads either:
+   - a pre-aggregated patient/ICU-stay summary CSV, or
+   - raw concept-level CSVs/tables exported from MIMIC-III SQL queries.
+2. Computes clinically motivated summary features.
+3. Applies pickle-safe rule-based decision trees for latent physiologic states.
+4. Saves:
+   - latent_tags.csv
+   - latent_tags_with_features.csv
+   - latent_decision_trees.pkl
+   - validation_summary.json
+   - prevalence.csv
+   - mortality_by_tag.csv
+   - cooccurrence_phi.csv
+
+Important note
+--------------
+This script intentionally stays rule-based and interpretable.
+It does NOT train a model for labeling.
+
+Recommended workflow
+--------------------
+Best practical use is:
+A. extract concept-level tables from MIMIC-III using SQL (labs, vitals, urine, vent, vasopressors, etc.)
+B. export those as CSVs
+C. run this script to aggregate + tag
+
+The script also supports a simpler path:
+- pass a prebuilt summary CSV with columns such as MAP_min, Lactate_max, GCS_min, etc.
+
+Authoring note
+--------------
+Some raw MIMIC-III extraction details depend on your local SQL pipeline / ITEMID mappings.
+Therefore this file includes:
+- fully implemented decision trees
+- a complete summary/tagging/validation pipeline
+- hooks for raw concept CSV inputs
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import pickle
+from dataclasses import dataclass
+from functools import partial
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+
+
+# ============================================================
+# Configuration
+# ============================================================
+
+LATENT_ORDER = [
+    "ChronicBurden",
+    "AcuteInsult",
+    "Severity",
+    "Inflammation",
+    "Shock",
+    "RespFail",
+    "RenalDysfunction",
+    "HepaticDysfunction",
+    "CoagDysfunction",
+    "NeuroDysfunction",
+    "CardiacInjury",
+    "MetabolicDerangement",
+]
+
+DEFAULT_THRESHOLDS = {
+    # Chronic burden
+    "chronic_age": 65,
+    "chronic_albumin": 3.0,
+
+    # Acute insult
+    "acute_emergency_types": {"EMERGENCY", "URGENT"},
+
+    # Severity
+    "severity_lactate": 4.0,
+    "severity_ph": 7.20,
+    "severity_gcs": 9,
+    "severity_platelets": 50,
+    "severity_creatinine": 3.5,
+    "severity_bilirubin": 6.0,
+
+    # Inflammation / SIRS
+    "sirs_temp_hi": 38.0,
+    "sirs_temp_lo": 36.0,
+    "sirs_hr": 90,
+    "sirs_rr": 20,
+    "sirs_paco2": 32,
+    "sirs_wbc_hi": 12.0,
+    "sirs_wbc_lo": 4.0,
+    "sirs_min_count": 2,
+
+    # Shock
+    "shock_map": 65,
+    "shock_sbp": 90,
+    "shock_lactate": 2.0,
+    "shock_urine_24h_ml": 500.0,
+    "shock_urine_6h_mlkg": 0.5,
+
+    # Respiratory failure
+    "resp_pf": 300.0,
+    "resp_sf": 315.0,
+    "resp_paco2": 45.0,
+    "resp_ph": 7.35,
+    "resp_spo2": 90.0,
+
+    # Renal dysfunction
+    "renal_creatinine_delta": 0.3,
+    "renal_creatinine_ratio": 1.5,
+    "renal_creatinine_abs": 2.0,
+    "renal_urine_24h_ml": 500.0,
+    "renal_urine_6h_mlkg": 0.5,
+
+    # Hepatic dysfunction
+    "hep_bilirubin": 2.0,
+    "hep_ast": 1000.0,
+    "hep_alt": 1000.0,
+
+    # Coagulation dysfunction
+    "coag_platelets": 100.0,
+    "coag_inr": 1.5,
+
+    # Neuro dysfunction
+    "neuro_gcs": 13,
+
+    # Cardiac injury fallback thresholds
+    "troponin_t_fallback": 0.1,
+    "troponin_i_fallback": 0.4,
+
+    # Metabolic derangement
+    "metab_ph": 7.30,
+    "metab_hco3": 18.0,
+    "metab_anion_gap": 16.0,
+    "metab_lactate": 4.0,
+    "metab_glucose_lo": 70.0,
+    "metab_glucose_hi": 180.0,
+}
+
+CHRONIC_ICD_KEYWORDS = [
+    "CHF", "HEART FAILURE", "COPD", "CHRONIC KIDNEY", "CKD", "CIRRHOSIS",
+    "MALIGNANC", "CANCER", "DIABETES", "DEMENTIA", "CAD", "CORONARY",
+    "ATRIAL FIB", "HYPERTENSION", "LIVER DISEASE", "ESRD",
+]
+
+ACUTE_ICD_KEYWORDS = [
+    "SEPSIS", "SEPTIC", "PNEUMONIA", "RESPIRATORY FAILURE", "ARDS",
+    "MYOCARDIAL INFARCTION", "STEMI", "NSTEMI", "STROKE", "INTRACRANIAL",
+    "TRAUMA", "HEMORRHAGE", "SHOCK", "PANCREATITIS", "GI BLEED",
+]
+
+
+# ============================================================
+# Utilities
+# ============================================================
+
+def ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
+
+
+def safe_float(x) -> float:
+    if x is None:
+        return np.nan
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return np.nan
+
+
+def is_notna(x) -> bool:
+    return pd.notna(x)
+
+
+def safe_div(a, b):
+    if pd.isna(a) or pd.isna(b) or b == 0:
+        return np.nan
+    return a / b
+
+
+def normalize_fio2_value(x):
+    """
+    Converts FiO2 to fraction when values are given as percentages.
+    Examples:
+        0.40 -> 0.40
+        40 -> 0.40
+        100 -> 1.0
+    """
+    if pd.isna(x):
+        return np.nan
+    x = float(x)
+    if x <= 0:
+        return np.nan
+    if x > 1.5:
+        return x / 100.0
+    return x
+
+
+def binary_phi(a: pd.Series, b: pd.Series) -> float:
+    """
+    Phi coefficient for two binary vectors.
+    Returns np.nan when undefined.
+    """
+    a = a.fillna(0).astype(int)
+    b = b.fillna(0).astype(int)
+
+    n11 = int(((a == 1) & (b == 1)).sum())
+    n10 = int(((a == 1) & (b == 0)).sum())
+    n01 = int(((a == 0) & (b == 1)).sum())
+    n00 = int(((a == 0) & (b == 0)).sum())
+
+    denom = math.sqrt((n11 + n10) * (n01 + n00) * (n11 + n01) * (n10 + n00))
+    if denom == 0:
+        return np.nan
+    return (n11 * n00 - n10 * n01) / denom
+
+
+def first_non_null(series: pd.Series):
+    s = series.dropna()
+    return s.iloc[0] if len(s) else np.nan
+
+
+def last_non_null(series: pd.Series):
+    s = series.dropna()
+    return s.iloc[-1] if len(s) else np.nan
+
+
+def standard_stats(series: pd.Series) -> Dict[str, float]:
+    s = series.dropna()
+    if len(s) == 0:
+        return {
+            "min": np.nan,
+            "max": np.nan,
+            "mean": np.nan,
+            "first": np.nan,
+            "last": np.nan,
+        }
+    return {
+        "min": s.min(),
+        "max": s.max(),
+        "mean": s.mean(),
+        "first": s.iloc[0],
+        "last": s.iloc[-1],
+    }
+
+
+# ============================================================
+# Decision tree functions (pickle-safe)
+# ============================================================
+
+def tag_chronic_burden(row: pd.Series, thr: dict = None) -> int:
+    thr = thr or DEFAULT_THRESHOLDS
+    age = row.get("Age")
+    albumin = row.get("Albumin_first")
+    chronic_icd = row.get("ChronicICD_any", 0)
+
+    return int(
+        (is_notna(age) and age >= thr["chronic_age"]) or
+        (chronic_icd == 1) or
+        (is_notna(albumin) and albumin < thr["chronic_albumin"])
+    )
+
+
+def tag_acute_insult(row: pd.Series, thr: dict = None) -> int:
+    thr = thr or DEFAULT_THRESHOLDS
+    admission_type = str(row.get("AdmissionType", "")).upper()
+    acute_icd = row.get("AcuteICD_any", 0)
+    mv_any = row.get("MechanicalVentilation_any", 0)
+    vaso_any = row.get("Vasopressors_any", 0)
+
+    return int(
+        (admission_type in thr["acute_emergency_types"]) or
+        (acute_icd == 1) or
+        (mv_any == 1) or
+        (vaso_any == 1)
+    )
+
+
+def tag_severity(row: pd.Series, thr: dict = None) -> int:
+    thr = thr or DEFAULT_THRESHOLDS
+    return int(
+        (row.get("Vasopressors_any", 0) == 1) or
+        (row.get("MechanicalVentilation_any", 0) == 1) or
+        (is_notna(row.get("Lactate_max")) and row["Lactate_max"] >= thr["severity_lactate"]) or
+        (is_notna(row.get("pH_min")) and row["pH_min"] <= thr["severity_ph"]) or
+        (is_notna(row.get("GCS_min")) and row["GCS_min"] <= thr["severity_gcs"]) or
+        (is_notna(row.get("Platelets_min")) and row["Platelets_min"] < thr["severity_platelets"]) or
+        (is_notna(row.get("Creatinine_max")) and row["Creatinine_max"] >= thr["severity_creatinine"]) or
+        (is_notna(row.get("Bilirubin_max")) and row["Bilirubin_max"] >= thr["severity_bilirubin"])
+    )
+
+
+def tag_inflammation(row: pd.Series, thr: dict = None) -> int:
+    thr = thr or DEFAULT_THRESHOLDS
+    suspected = row.get("SuspectedInfection_any", 0) == 1
+    sirs_count = row.get("SIRS_count_max")
+    return int(
+        suspected or
+        (is_notna(sirs_count) and sirs_count >= thr["sirs_min_count"])
+    )
+
+
+def tag_shock(row: pd.Series, thr: dict = None) -> int:
+    thr = thr or DEFAULT_THRESHOLDS
+    return int(
+        (row.get("Vasopressors_any", 0) == 1) or
+        (is_notna(row.get("MAP_min")) and row["MAP_min"] < thr["shock_map"]) or
+        (is_notna(row.get("SBP_min")) and row["SBP_min"] < thr["shock_sbp"]) or
+        (is_notna(row.get("Lactate_max")) and row["Lactate_max"] > thr["shock_lactate"]) or
+        (is_notna(row.get("UrineOutput_sum_24h")) and row["UrineOutput_sum_24h"] < thr["shock_urine_24h_ml"]) or
+        (is_notna(row.get("UrineOutput_mlkg_6h_min")) and row["UrineOutput_mlkg_6h_min"] < thr["shock_urine_6h_mlkg"])
+    )
+
+
+def tag_respfail(row: pd.Series, thr: dict = None) -> int:
+    thr = thr or DEFAULT_THRESHOLDS
+    return int(
+        (row.get("MechanicalVentilation_any", 0) == 1) or
+        (is_notna(row.get("PF_ratio_min")) and row["PF_ratio_min"] < thr["resp_pf"]) or
+        (is_notna(row.get("SF_ratio_min")) and row["SF_ratio_min"] < thr["resp_sf"]) or
+        (
+            is_notna(row.get("PaCO2_max")) and
+            is_notna(row.get("pH_min")) and
+            row["PaCO2_max"] >= thr["resp_paco2"] and
+            row["pH_min"] < thr["resp_ph"]
+        ) or
+        (is_notna(row.get("SpO2_min")) and row["SpO2_min"] < thr["resp_spo2"])
+    )
+
+
+def tag_renal_dysfunction(row: pd.Series, thr: dict = None) -> int:
+    thr = thr or DEFAULT_THRESHOLDS
+    return int(
+        (is_notna(row.get("Creatinine_delta")) and row["Creatinine_delta"] >= thr["renal_creatinine_delta"]) or
+        (is_notna(row.get("Creatinine_ratio")) and row["Creatinine_ratio"] >= thr["renal_creatinine_ratio"]) or
+        (is_notna(row.get("Creatinine_max")) and row["Creatinine_max"] >= thr["renal_creatinine_abs"]) or
+        (is_notna(row.get("UrineOutput_mlkg_6h_min")) and row["UrineOutput_mlkg_6h_min"] < thr["renal_urine_6h_mlkg"]) or
+        (is_notna(row.get("UrineOutput_sum_24h")) and row["UrineOutput_sum_24h"] < thr["renal_urine_24h_ml"])
+    )
+
+
+def tag_hepatic_dysfunction(row: pd.Series, thr: dict = None) -> int:
+    thr = thr or DEFAULT_THRESHOLDS
+    return int(
+        (is_notna(row.get("Bilirubin_max")) and row["Bilirubin_max"] >= thr["hep_bilirubin"]) or
+        (is_notna(row.get("AST_max")) and row["AST_max"] >= thr["hep_ast"]) or
+        (is_notna(row.get("ALT_max")) and row["ALT_max"] >= thr["hep_alt"])
+    )
+
+
+def tag_coag_dysfunction(row: pd.Series, thr: dict = None) -> int:
+    thr = thr or DEFAULT_THRESHOLDS
+    return int(
+        (is_notna(row.get("Platelets_min")) and row["Platelets_min"] < thr["coag_platelets"]) or
+        (is_notna(row.get("INR_max")) and row["INR_max"] >= thr["coag_inr"])
+    )
+
+
+def tag_neuro_dysfunction(row: pd.Series, thr: dict = None) -> int:
+    thr = thr or DEFAULT_THRESHOLDS
+    return int(
+        is_notna(row.get("GCS_min")) and row["GCS_min"] < thr["neuro_gcs"]
+    )
+
+
+def tag_cardiac_injury(row: pd.Series, thr: dict = None) -> int:
+    thr = thr or DEFAULT_THRESHOLDS
+    if row.get("TroponinPositive_any", 0) == 1:
+        return 1
+
+    tropt = row.get("TroponinT_max")
+    tropi = row.get("TroponinI_max")
+
+    return int(
+        (is_notna(tropt) and tropt >= thr["troponin_t_fallback"]) or
+        (is_notna(tropi) and tropi >= thr["troponin_i_fallback"])
+    )
+
+
+def tag_metabolic_derangement(row: pd.Series, thr: dict = None) -> int:
+    thr = thr or DEFAULT_THRESHOLDS
+    return int(
+        (is_notna(row.get("pH_min")) and row["pH_min"] < thr["metab_ph"]) or
+        (is_notna(row.get("Bicarbonate_min")) and row["Bicarbonate_min"] < thr["metab_hco3"]) or
+        (is_notna(row.get("AnionGap_max")) and row["AnionGap_max"] > thr["metab_anion_gap"]) or
+        (is_notna(row.get("Lactate_max")) and row["Lactate_max"] >= thr["metab_lactate"]) or
+        (is_notna(row.get("Glucose_min")) and row["Glucose_min"] < thr["metab_glucose_lo"]) or
+        (is_notna(row.get("Glucose_max")) and row["Glucose_max"] >= thr["metab_glucose_hi"])
+    )
+
+
+def get_latent_decision_trees(thr: dict = None) -> Dict[str, Callable[[pd.Series], int]]:
+    thr = thr or DEFAULT_THRESHOLDS
+    return {
+        "ChronicBurden": partial(tag_chronic_burden, thr=thr),
+        "AcuteInsult": partial(tag_acute_insult, thr=thr),
+        "Severity": partial(tag_severity, thr=thr),
+        "Inflammation": partial(tag_inflammation, thr=thr),
+        "Shock": partial(tag_shock, thr=thr),
+        "RespFail": partial(tag_respfail, thr=thr),
+        "RenalDysfunction": partial(tag_renal_dysfunction, thr=thr),
+        "HepaticDysfunction": partial(tag_hepatic_dysfunction, thr=thr),
+        "CoagDysfunction": partial(tag_coag_dysfunction, thr=thr),
+        "NeuroDysfunction": partial(tag_neuro_dysfunction, thr=thr),
+        "CardiacInjury": partial(tag_cardiac_injury, thr=thr),
+        "MetabolicDerangement": partial(tag_metabolic_derangement, thr=thr),
+    }
+
+
+# ============================================================
+# Raw concept table loading
+# ============================================================
+
+@dataclass
+class RawConceptTables:
+    admissions: Optional[pd.DataFrame] = None
+    diagnoses: Optional[pd.DataFrame] = None
+    vitals: Optional[pd.DataFrame] = None
+    labs: Optional[pd.DataFrame] = None
+    urine: Optional[pd.DataFrame] = None
+    vaso: Optional[pd.DataFrame] = None
+    vent: Optional[pd.DataFrame] = None
+    cultures_antibiotics: Optional[pd.DataFrame] = None
+    troponin_map: Optional[pd.DataFrame] = None
+
+
+def maybe_read_csv(path: Optional[str]) -> Optional[pd.DataFrame]:
+    if path is None or not os.path.exists(path):
+        return None
+    return pd.read_csv(path)
+
+
+def load_raw_concept_tables(args) -> RawConceptTables:
+    return RawConceptTables(
+        admissions=maybe_read_csv(args.admissions_csv),
+        diagnoses=maybe_read_csv(args.diagnoses_csv),
+        vitals=maybe_read_csv(args.vitals_csv),
+        labs=maybe_read_csv(args.labs_csv),
+        urine=maybe_read_csv(args.urine_csv),
+        vaso=maybe_read_csv(args.vaso_csv),
+        vent=maybe_read_csv(args.vent_csv),
+        cultures_antibiotics=maybe_read_csv(args.infection_csv),
+        troponin_map=maybe_read_csv(args.troponin_map_csv),
+    )
+
+
+# ============================================================
+# ICD helper flags
+# ============================================================
+
+def add_icd_flags(
+    admissions_df: pd.DataFrame,
+    diagnoses_df: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    df = admissions_df.copy()
+
+    if diagnoses_df is None or diagnoses_df.empty:
+        df["ChronicICD_any"] = 0
+        df["AcuteICD_any"] = 0
+        return df
+
+    dx = diagnoses_df.copy()
+    for col in ["long_title", "SHORT_TITLE", "short_title", "diagnosis"]:
+        if col in dx.columns:
+            dx["dx_text"] = dx[col].astype(str)
+            break
+    else:
+        dx["dx_text"] = ""
+
+    dx["dx_text_u"] = dx["dx_text"].str.upper()
+
+    chronic = (
+        dx.groupby("icustay_id")["dx_text_u"]
+        .apply(lambda s: int(any(any(k in text for k in CHRONIC_ICD_KEYWORDS) for text in s)))
+        .rename("ChronicICD_any")
+        .reset_index()
+    )
+
+    acute = (
+        dx.groupby("icustay_id")["dx_text_u"]
+        .apply(lambda s: int(any(any(k in text for k in ACUTE_ICD_KEYWORDS) for text in s)))
+        .rename("AcuteICD_any")
+        .reset_index()
+    )
+
+    df = df.merge(chronic, on="icustay_id", how="left")
+    df = df.merge(acute, on="icustay_id", how="left")
+    df["ChronicICD_any"] = df["ChronicICD_any"].fillna(0).astype(int)
+    df["AcuteICD_any"] = df["AcuteICD_any"].fillna(0).astype(int)
+    return df
+
+
+# ============================================================
+# Summary building from concept-level data
+# ============================================================
+
+def _aggregate_named_variable_events(
+    df: pd.DataFrame,
+    id_col: str,
+    time_col: str,
+    variable_col: str,
+    value_col: str,
+    variables: Iterable[str],
+) -> pd.DataFrame:
+    """
+    Aggregates long-format events into summary columns:
+    Variable_min, Variable_max, Variable_mean, Variable_first, Variable_last
+    """
+    if df is None or df.empty:
+        return pd.DataFrame({id_col: []})
+
+    work = df.copy()
+    work = work[work[variable_col].isin(list(variables))].copy()
+    if work.empty:
+        return pd.DataFrame({id_col: []})
+
+    work[time_col] = pd.to_datetime(work[time_col], errors="coerce")
+    work[value_col] = pd.to_numeric(work[value_col], errors="coerce")
+    work = work.dropna(subset=[id_col, time_col])
+
+    rows = []
+    for stay_id, g in work.groupby(id_col):
+        g = g.sort_values(time_col)
+        row = {id_col: stay_id}
+
+        for var, sub in g.groupby(variable_col):
+            stats = standard_stats(sub[value_col])
+            for stat_name, stat_val in stats.items():
+                row[f"{var}_{stat_name}"] = stat_val
+
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def _aggregate_binary_any(
+    df: pd.DataFrame,
+    id_col: str,
+    binary_col: str,
+    out_name: str,
+) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame({id_col: []})
+    tmp = df.groupby(id_col)[binary_col].max().reset_index()
+    tmp = tmp.rename(columns={binary_col: out_name})
+    return tmp
+
+
+def _aggregate_urine(
+    urine_df: Optional[pd.DataFrame],
+    id_col: str = "icustay_id",
+    time_col: str = "charttime",
+    value_col: str = "value",
+    weight_col: str = "weight_kg",
+) -> pd.DataFrame:
+    if urine_df is None or urine_df.empty:
+        return pd.DataFrame({id_col: []})
+
+    u = urine_df.copy()
+    u[time_col] = pd.to_datetime(u[time_col], errors="coerce")
+    u[value_col] = pd.to_numeric(u[value_col], errors="coerce")
+    if weight_col in u.columns:
+        u[weight_col] = pd.to_numeric(u[weight_col], errors="coerce")
+
+    rows = []
+    for stay_id, g in u.groupby(id_col):
+        g = g.sort_values(time_col).dropna(subset=[time_col])
+        row = {id_col: stay_id}
+
+        if len(g) == 0:
+            rows.append(row)
+            continue
+
+        # 24h sum from available rows
+        row["UrineOutput_sum_24h"] = g[value_col].sum(skipna=True)
+
+        # Approximate 6h rolling normalized urine output if weight exists
+        if weight_col in g.columns and g[weight_col].notna().any():
+            weight = g[weight_col].dropna().iloc[0]
+        else:
+            weight = np.nan
+
+        if len(g) >= 1 and is_notna(weight) and weight > 0:
+            gg = g[[time_col, value_col]].dropna().copy()
+            if len(gg):
+                gg = gg.set_index(time_col).sort_index()
+                # Rolling 6h total / weight / 6
+                roll = gg[value_col].rolling("6H").sum() / weight / 6.0
+                row["UrineOutput_mlkg_6h_min"] = roll.min() if len(roll) else np.nan
+            else:
+                row["UrineOutput_mlkg_6h_min"] = np.nan
+        else:
+            row["UrineOutput_mlkg_6h_min"] = np.nan
+
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def _aggregate_infection(
+    inf_df: Optional[pd.DataFrame],
+    id_col: str = "icustay_id",
+    suspicion_col: str = "suspected_infection",
+) -> pd.DataFrame:
+    if inf_df is None or inf_df.empty:
+        return pd.DataFrame({id_col: []})
+
+    if suspicion_col not in inf_df.columns:
+        tmp = inf_df.copy()
+        tmp[suspicion_col] = 1
+    else:
+        tmp = inf_df.copy()
+
+    out = tmp.groupby(id_col)[suspicion_col].max().reset_index()
+    out = out.rename(columns={suspicion_col: "SuspectedInfection_any"})
+    return out
+
+
+def _compute_sirs_features(summary_df: pd.DataFrame) -> pd.DataFrame:
+    df = summary_df.copy()
+
+    def sirs_count(row):
+        count = 0
+        if is_notna(row.get("Temperature_max")) and row["Temperature_max"] > DEFAULT_THRESHOLDS["sirs_temp_hi"]:
+            count += 1
+        elif is_notna(row.get("Temperature_min")) and row["Temperature_min"] < DEFAULT_THRESHOLDS["sirs_temp_lo"]:
+            count += 1
+
+        if is_notna(row.get("HR_max")) and row["HR_max"] > DEFAULT_THRESHOLDS["sirs_hr"]:
+            count += 1
+
+        rr_flag = (
+            is_notna(row.get("RR_max")) and row["RR_max"] > DEFAULT_THRESHOLDS["sirs_rr"]
+        )
+        paco2_flag = (
+            is_notna(row.get("PaCO2_min")) and row["PaCO2_min"] < DEFAULT_THRESHOLDS["sirs_paco2"]
+        )
+        if rr_flag or paco2_flag:
+            count += 1
+
+        wbc_hi = is_notna(row.get("WBC_max")) and row["WBC_max"] > DEFAULT_THRESHOLDS["sirs_wbc_hi"]
+        wbc_lo = is_notna(row.get("WBC_min")) and row["WBC_min"] < DEFAULT_THRESHOLDS["sirs_wbc_lo"]
+        if wbc_hi or wbc_lo:
+            count += 1
+
+        return count
+
+    df["SIRS_count_max"] = df.apply(sirs_count, axis=1)
+    return df
+
+
+def _compute_derived_features(summary_df: pd.DataFrame) -> pd.DataFrame:
+    df = summary_df.copy()
+
+    # FiO2 normalization
+    for col in [c for c in df.columns if c.startswith("FiO2_")]:
+        df[col] = df[col].apply(normalize_fio2_value)
+
+    # PF ratio: prefer worst oxygenation proxy using PaO2_min and FiO2_max
+    df["PF_ratio_min"] = [
+        safe_div(a, b)
+        for a, b in zip(df.get("PaO2_min", pd.Series(np.nan, index=df.index)),
+                        df.get("FiO2_max", pd.Series(np.nan, index=df.index)))
+    ]
+
+    # SF ratio
+    fio2_for_sf = df["FiO2_max"] if "FiO2_max" in df.columns else pd.Series(np.nan, index=df.index)
+    spo2_min = df["SpO2_min"] if "SpO2_min" in df.columns else pd.Series(np.nan, index=df.index)
+    df["SF_ratio_min"] = [safe_div(a, b) for a, b in zip(spo2_min, fio2_for_sf)]
+
+    # Creatinine KDIGO helper
+    if "Creatinine_max" in df.columns and "Creatinine_first" in df.columns:
+        df["Creatinine_delta"] = df["Creatinine_max"] - df["Creatinine_first"]
+        df["Creatinine_ratio"] = [
+            safe_div(a, b) for a, b in zip(df["Creatinine_max"], df["Creatinine_first"])
+        ]
+    else:
+        df["Creatinine_delta"] = np.nan
+        df["Creatinine_ratio"] = np.nan
+
+    return df
+
+
+def build_summary_from_raw_tables(raw: RawConceptTables) -> pd.DataFrame:
+    if raw.admissions is None or raw.admissions.empty:
+        raise ValueError(
+            "Raw-table mode requires at least admissions_csv with one row per ICU stay "
+            "and columns including icustay_id. "
+            "You can also skip raw mode and pass --summary_csv."
+        )
+
+    admissions = raw.admissions.copy()
+    required_id = "icustay_id"
+    if required_id not in admissions.columns:
+        raise ValueError("admissions_csv must include column 'icustay_id'.")
+
+    summary = admissions.copy()
+
+    # ICD-based helper flags
+    summary = add_icd_flags(summary, raw.diagnoses)
+
+    # Vitals aggregation
+    if raw.vitals is not None and not raw.vitals.empty:
+        vitals_summary = _aggregate_named_variable_events(
+            raw.vitals,
+            id_col="icustay_id",
+            time_col="charttime",
+            variable_col="variable",
+            value_col="value",
+            variables=[
+                "HR", "SBP", "DBP", "MAP", "RR", "SpO2", "Temperature", "GCS", "FiO2"
+            ],
+        )
+        summary = summary.merge(vitals_summary, on="icustay_id", how="left")
+
+    # Labs aggregation
+    if raw.labs is not None and not raw.labs.empty:
+        labs_summary = _aggregate_named_variable_events(
+            raw.labs,
+            id_col="icustay_id",
+            time_col="charttime",
+            variable_col="variable",
+            value_col="value",
+            variables=[
+                "Lactate", "PaO2", "PaCO2", "pH", "Bicarbonate", "Creatinine",
+                "BUN", "Sodium", "Potassium", "AST", "ALT", "Bilirubin",
+                "Albumin", "Platelets", "WBC", "Glucose", "AnionGap",
+                "TroponinT", "TroponinI", "INR",
+            ],
+        )
+        summary = summary.merge(labs_summary, on="icustay_id", how="left")
+
+    # Urine aggregation
+    urine_summary = _aggregate_urine(raw.urine)
+    summary = summary.merge(urine_summary, on="icustay_id", how="left")
+
+    # Vasopressors
+    if raw.vaso is not None and not raw.vaso.empty:
+        vaso = raw.vaso.copy()
+        if "vasopressor" not in vaso.columns:
+            vaso["vasopressor"] = 1
+        vaso_summary = _aggregate_binary_any(vaso, "icustay_id", "vasopressor", "Vasopressors_any")
+        summary = summary.merge(vaso_summary, on="icustay_id", how="left")
+
+    # Mechanical ventilation
+    if raw.vent is not None and not raw.vent.empty:
+        vent = raw.vent.copy()
+        if "mechanical_ventilation" not in vent.columns:
+            vent["mechanical_ventilation"] = 1
+        vent_summary = _aggregate_binary_any(vent, "icustay_id", "mechanical_ventilation", "MechanicalVentilation_any")
+        summary = summary.merge(vent_summary, on="icustay_id", how="left")
+
+    # Infection flag
+    infection_summary = _aggregate_infection(raw.cultures_antibiotics)
+    summary = summary.merge(infection_summary, on="icustay_id", how="left")
+
+    # Troponin positivity map
+    if raw.troponin_map is not None and not raw.troponin_map.empty:
+        tmap = raw.troponin_map.copy()
+        cols_needed = {"icustay_id", "troponin_positive"}
+        if cols_needed.issubset(set(tmap.columns)):
+            tpos = (
+                tmap.groupby("icustay_id")["troponin_positive"]
+                .max()
+                .reset_index()
+                .rename(columns={"troponin_positive": "TroponinPositive_any"})
+            )
+            summary = summary.merge(tpos, on="icustay_id", how="left")
+
+    # Fill absent binary helpers
+    for col in ["Vasopressors_any", "MechanicalVentilation_any", "SuspectedInfection_any", "TroponinPositive_any"]:
+        if col not in summary.columns:
+            summary[col] = 0
+        summary[col] = summary[col].fillna(0).astype(int)
+
+    summary = _compute_sirs_features(summary)
+    summary = _compute_derived_features(summary)
+    return summary
+
+
+# ============================================================
+# Summary CSV mode
+# ============================================================
+
+def load_summary_csv(summary_csv: str) -> pd.DataFrame:
+    df = pd.read_csv(summary_csv)
+    if "icustay_id" not in df.columns:
+        if "patient_id" in df.columns:
+            df = df.rename(columns={"patient_id": "icustay_id"})
+        elif "stay_id" in df.columns:
+            df = df.rename(columns={"stay_id": "icustay_id"})
+        else:
+            raise ValueError(
+                "summary_csv must contain one of: icustay_id, patient_id, stay_id"
+            )
+
+    # Normalize binary helpers if present
+    for col in ["Vasopressors_any", "MechanicalVentilation_any", "SuspectedInfection_any", "TroponinPositive_any", "ChronicICD_any", "AcuteICD_any"]:
+        if col in df.columns:
+            df[col] = df[col].fillna(0).astype(int)
+
+    df = _compute_sirs_features(df) if "SIRS_count_max" not in df.columns else df
+    df = _compute_derived_features(df)
+    return df
+
+
+# ============================================================
+# Tagging pipeline
+# ============================================================
+
+def apply_decision_trees(
+    summary_df: pd.DataFrame,
+    decision_trees: Dict[str, Callable[[pd.Series], int]],
+) -> pd.DataFrame:
+    rows = []
+    for _, row in summary_df.iterrows():
+        out = {"icustay_id": row["icustay_id"]}
+        for latent_name, fn in decision_trees.items():
+            out[latent_name] = int(fn(row))
+        rows.append(out)
+    return pd.DataFrame(rows)
+
+
+# ============================================================
+# Validation
+# ============================================================
+
+def prevalence_table(latent_df: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    n = len(latent_df)
+    for latent in LATENT_ORDER:
+        if latent not in latent_df.columns:
+            continue
+        s = latent_df[latent].fillna(0).astype(int)
+        rows.append({
+            "latent": latent,
+            "n_positive": int(s.sum()),
+            "prevalence": float(s.mean()) if n > 0 else np.nan,
+        })
+    return pd.DataFrame(rows)
+
+
+def mortality_by_tag_table(
+    latent_df: pd.DataFrame,
+    summary_df: pd.DataFrame,
+) -> pd.DataFrame:
+    if "InHospitalMortality" not in summary_df.columns:
+        return pd.DataFrame(columns=["latent", "mortality_tag0", "mortality_tag1", "risk_ratio"])
+
+    merged = latent_df.merge(
+        summary_df[["icustay_id", "InHospitalMortality"]],
+        on="icustay_id",
+        how="left",
+    )
+
+    rows = []
+    for latent in LATENT_ORDER:
+        if latent not in merged.columns:
+            continue
+
+        g0 = merged.loc[merged[latent] == 0, "InHospitalMortality"]
+        g1 = merged.loc[merged[latent] == 1, "InHospitalMortality"]
+
+        m0 = float(g0.mean()) if len(g0) else np.nan
+        m1 = float(g1.mean()) if len(g1) else np.nan
+        rr = safe_div(m1, m0)
+
+        rows.append({
+            "latent": latent,
+            "n_tag0": int((merged[latent] == 0).sum()),
+            "n_tag1": int((merged[latent] == 1).sum()),
+            "mortality_tag0": m0,
+            "mortality_tag1": m1,
+            "risk_ratio": rr,
+        })
+
+    return pd.DataFrame(rows)
+
+
+def cooccurrence_phi_table(latent_df: pd.DataFrame) -> pd.DataFrame:
+    cols = [c for c in LATENT_ORDER if c in latent_df.columns]
+    mat = pd.DataFrame(index=cols, columns=cols, dtype=float)
+
+    for c1 in cols:
+        for c2 in cols:
+            mat.loc[c1, c2] = binary_phi(latent_df[c1], latent_df[c2])
+
+    return mat
+
+
+def sanity_checks(latent_df: pd.DataFrame) -> Dict[str, dict]:
+    results = {}
+    for latent in LATENT_ORDER:
+        if latent not in latent_df.columns:
+            continue
+        s = latent_df[latent].fillna(0).astype(int)
+        p = float(s.mean()) if len(s) else np.nan
+        results[latent] = {
+            "all_zero": bool((s == 0).all()),
+            "all_one": bool((s == 1).all()),
+            "prevalence": p,
+            "flag_too_rare_lt_0_5pct": bool(is_notna(p) and p < 0.005),
+            "flag_too_common_gt_95pct": bool(is_notna(p) and p > 0.95),
+        }
+    return results
+
+
+def build_validation_summary(
+    latent_df: pd.DataFrame,
+    summary_df: pd.DataFrame,
+) -> dict:
+    prevalence = prevalence_table(latent_df)
+    mortality = mortality_by_tag_table(latent_df, summary_df)
+    checks = sanity_checks(latent_df)
+
+    return {
+        "n_stays": int(len(latent_df)),
+        "available_latents": [c for c in LATENT_ORDER if c in latent_df.columns],
+        "prevalence": prevalence.to_dict(orient="records"),
+        "mortality_by_tag": mortality.to_dict(orient="records"),
+        "sanity_checks": checks,
+        "notes": [
+            "High-prevalence tags may indicate too-soft thresholds or cohort-specific severity.",
+            "Very low-prevalence tags may indicate too-harsh thresholds or missing concept extraction.",
+            "Interpret cardiac injury carefully if TroponinPositive_any is unavailable and fallback thresholds are used.",
+            "RespFail is more robust when PaO2/FiO2 and SpO2/FiO2 are both available.",
+            "RenalDysfunction is more robust when urine output and weight are available.",
+        ],
+    }
+
+
+# ============================================================
+# Saving
+# ============================================================
+
+def save_outputs(
+    output_dir: str,
+    summary_df: pd.DataFrame,
+    latent_df: pd.DataFrame,
+    decision_trees: dict,
+    validation_summary: dict,
+) -> None:
+    ensure_dir(output_dir)
+
+    tags_path = os.path.join(output_dir, "latent_tags.csv")
+    merged_path = os.path.join(output_dir, "latent_tags_with_features.csv")
+    trees_path = os.path.join(output_dir, "latent_decision_trees.pkl")
+    prevalence_path = os.path.join(output_dir, "prevalence.csv")
+    mortality_path = os.path.join(output_dir, "mortality_by_tag.csv")
+    cooccur_path = os.path.join(output_dir, "cooccurrence_phi.csv")
+    validation_path = os.path.join(output_dir, "validation_summary.json")
+
+    latent_df.to_csv(tags_path, index=False)
+    summary_df.merge(latent_df, on="icustay_id", how="left").to_csv(merged_path, index=False)
+    prevalence_table(latent_df).to_csv(prevalence_path, index=False)
+    mortality_by_tag_table(latent_df, summary_df).to_csv(mortality_path, index=False)
+    cooccurrence_phi_table(latent_df).to_csv(cooccur_path)
+
+    with open(trees_path, "wb") as f:
+        pickle.dump(decision_trees, f)
+
+    with open(validation_path, "w", encoding="utf-8") as f:
+        json.dump(validation_summary, f, indent=2)
+
+
+# ============================================================
+# Main
+# ============================================================
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Rule-based latent variable tagging for MIMIC-III ICU stays.")
+
+    # Input modes
+    p.add_argument("--summary_csv", type=str, default=None,
+                   help="Pre-aggregated summary CSV with one row per ICU stay.")
+
+    # Raw concept CSVs
+    p.add_argument("--admissions_csv", type=str, default=None)
+    p.add_argument("--diagnoses_csv", type=str, default=None)
+    p.add_argument("--vitals_csv", type=str, default=None)
+    p.add_argument("--labs_csv", type=str, default=None)
+    p.add_argument("--urine_csv", type=str, default=None)
+    p.add_argument("--vaso_csv", type=str, default=None)
+    p.add_argument("--vent_csv", type=str, default=None)
+    p.add_argument("--infection_csv", type=str, default=None)
+    p.add_argument("--troponin_map_csv", type=str, default=None)
+
+    # Output
+    p.add_argument("--output_dir", type=str, default="mimiciii_latent_tags_output")
+
+    return p.parse_args()
+
+
+def main():
+    args = parse_args()
+    ensure_dir(args.output_dir)
+
+    summary_mode = args.summary_csv is not None
+    raw_mode = any([
+        args.admissions_csv,
+        args.diagnoses_csv,
+        args.vitals_csv,
+        args.labs_csv,
+        args.urine_csv,
+        args.vaso_csv,
+        args.vent_csv,
+        args.infection_csv,
+        args.troponin_map_csv,
+    ])
+
+    if not summary_mode and not raw_mode:
+        raise ValueError(
+            "Provide either --summary_csv OR raw concept CSV inputs "
+            "(at minimum admissions_csv for raw mode)."
+        )
+
+    if summary_mode:
+        print("[1/5] Loading summary CSV...")
+        summary_df = load_summary_csv(args.summary_csv)
+    else:
+        print("[1/5] Loading raw concept CSVs...")
+        raw = load_raw_concept_tables(args)
+        print("[2/5] Building summary dataframe from raw concept tables...")
+        summary_df = build_summary_from_raw_tables(raw)
+
+    if "icustay_id" not in summary_df.columns:
+        raise ValueError("Summary dataframe must contain icustay_id.")
+
+    print(f"[3/5] Summary dataframe shape: {summary_df.shape}")
+
+    decision_trees = get_latent_decision_trees()
+
+    print("[4/5] Applying decision trees...")
+    latent_df = apply_decision_trees(summary_df, decision_trees)
+
+    print("[5/5] Running validation and saving outputs...")
+    validation_summary = build_validation_summary(latent_df, summary_df)
+    save_outputs(args.output_dir, summary_df, latent_df, decision_trees, validation_summary)
+
+    print("\nDone.")
+    print(f"Saved outputs to: {os.path.abspath(args.output_dir)}")
+    print("Files:")
+    for fname in [
+        "latent_tags.csv",
+        "latent_tags_with_features.csv",
+        "latent_decision_trees.pkl",
+        "validation_summary.json",
+        "prevalence.csv",
+        "mortality_by_tag.csv",
+        "cooccurrence_phi.csv",
+    ]:
+        print(f"  - {fname}")
+
+
+if __name__ == "__main__":
+    main()

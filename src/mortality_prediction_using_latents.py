@@ -1,3 +1,4 @@
+import argparse
 import os
 import pickle
 import numpy as np
@@ -13,6 +14,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
 
+DATASET_MODEL = "physionet"
 latent_tags_csv_path = "../../data/predicted_latent_tags_230326_absolute_tags.csv"
 physionet_ts_oc_ids_pkl_path = '../../data/processed/physionet2012_ts_oc_ids.pkl'
 results_txt_path = "predicted_230326_mortality_prediction_results.txt"
@@ -22,9 +24,61 @@ results_txt_path = "predicted_230326_mortality_prediction_results.txt"
 # =========================
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Train mortality predictors from latent clinical tags."
+    )
+    parser.add_argument(
+        "--model",
+        choices=["physionet", "mimic"],
+        default=DATASET_MODEL,
+        help=f"Dataset selector for path defaults. Default: {DATASET_MODEL}",
+    )
+    parser.add_argument("--latent-tags-path", default=None)
+    parser.add_argument("--physionet-pkl-path", default=None)
+    return parser.parse_args()
+
+
+def get_dataset_defaults(model: str):
+    if model == "physionet":
+        return {
+            "latent_tags_path": latent_tags_csv_path,
+            "physionet_pkl_path": physionet_ts_oc_ids_pkl_path,
+        }
+    if model == "mimic":
+        return {
+            "latent_tags_path": "mimiciii_latent_tags_output/latent_tags.csv",
+            "physionet_pkl_path": "../data/processed/mimic_iii_ts_oc_ids.pkl",
+        }
+    raise ValueError(f"Unsupported model: {model!r}")
+
+
+def resolve_runtime_path(cli_value: str | None, default_value: str, field_name: str) -> str:
+    raw_value = cli_value if cli_value is not None else default_value
+    raw_value = raw_value.strip()
+    if not raw_value:
+        raise ValueError(f"{field_name} is empty. Provide a non-empty path.")
+
+    resolved_path = os.path.abspath(os.path.expanduser(raw_value))
+    if not os.path.exists(resolved_path):
+        raise FileNotFoundError(f"{field_name} does not exist: {resolved_path}")
+    if not os.path.isfile(resolved_path):
+        raise FileNotFoundError(f"{field_name} is not a file: {resolved_path}")
+    return resolved_path
+
+
 def load_latents_and_outcomes(latent_tags_csv_path: str, physionet_ts_oc_ids_pkl_path: str) -> pd.DataFrame:
     # latent tags
     latent_df = pd.read_csv(latent_tags_csv_path)
+    if "ts_id" in latent_df.columns:
+        latent_df = latent_df.copy()
+    elif DATASET_MODEL == "mimic" and "icustay_id" in latent_df.columns:
+        latent_df = latent_df.rename(columns={"icustay_id": "ts_id"}).copy()
+    else:
+        raise ValueError(
+            "Latent tags CSV must contain 'ts_id', or contain 'icustay_id' when "
+            f"--model mimic is used. Source: {latent_tags_csv_path}"
+        )
 
     # outcomes (from your preprocess pickle)
     with open(physionet_ts_oc_ids_pkl_path, "rb") as f:
@@ -277,4 +331,25 @@ def run_mortality_from_latents(
     }
 
 
-out = run_mortality_from_latents(latent_tags_csv_path, physionet_ts_oc_ids_pkl_path)
+def main():
+    global DATASET_MODEL
+    args = parse_args()
+    DATASET_MODEL = args.model
+    dataset_defaults = get_dataset_defaults(DATASET_MODEL)
+    latent_path = resolve_runtime_path(
+        args.latent_tags_path,
+        dataset_defaults["latent_tags_path"],
+        "LATENT_TAGS_PATH",
+    )
+    physionet_pkl_path = resolve_runtime_path(
+        args.physionet_pkl_path,
+        dataset_defaults["physionet_pkl_path"],
+        "PHYSIONET_PKL_PATH",
+    )
+    return run_mortality_from_latents(latent_path, physionet_pkl_path)
+
+
+if __name__ == "__main__":
+    out = main()
+else:
+    out = run_mortality_from_latents(latent_tags_csv_path, physionet_ts_oc_ids_pkl_path)
