@@ -1,12 +1,19 @@
 import pandas as pd
 from tqdm import tqdm
-import pickle
 import numpy as np
 import os
-import yaml
+
+from preprocess_mimic_iii_large_contract import (
+    assert_physionet_compatible_output,
+    build_canonical_oc,
+    build_canonical_ts,
+    build_ts_ids,
+    serialize_processed_output,
+)
 
 
-RAW_DATA_PATH = '/home/datasets/mimiciii1.4'
+RAW_DATA_PATH = 'mimiciii'
+OUTPUT_PATH = '../data/processed/mimic_iii_ts_oc_ids.pkl'
 
 # Get all ICU stays.
 icu = pd.read_csv(os.path.join(RAW_DATA_PATH,'ICUSTAYS.csv'), 
@@ -783,22 +790,16 @@ icu = icu.loc[((icu.DEATHTIME-icu.INTIME)>=pd.Timedelta(24,'h'))|icu.DEATHTIME.i
 # Get icustays with aleast one event in first 24h.
 icu = icu.loc[icu.ICUSTAY_ID.isin(events.loc[events.rel_charttime<24*60].ICUSTAY_ID)]
 
-# Get sup and unsup icustays.
-all_icustays = np.array(icu_full.ICUSTAY_ID)
-sup_icustays = np.array(icu.ICUSTAY_ID)
-unsup_icustays = np.setdiff1d(all_icustays, sup_icustays)
-all_icustays = np.concatenate((sup_icustays, unsup_icustays), axis=-1)
-
 # Rename some columns.
 events.rename(columns={'rel_charttime':'minute', 'NAME':'variable', 
                        'VALUENUM':'value', 'ICUSTAY_ID':'ts_id'}, inplace=True)
 
 # Add gender and age.
 icu_full.rename(columns={'ICUSTAY_ID':'ts_id'}, inplace=True)
-data_age = icu_full[['ts_id', 'AGE']]
+data_age = icu_full[['ts_id', 'AGE']].copy()
 data_age['variable'] = 'Age'
 data_age.rename(columns={'AGE':'value'}, inplace=True)
-data_gen = icu_full[['ts_id', 'GENDER']]
+data_gen = icu_full[['ts_id', 'GENDER']].copy()
 data_gen.loc[data_gen.GENDER=='M', 'GENDER'] = 0
 data_gen.loc[data_gen.GENDER=='F', 'GENDER'] = 1
 data_gen['variable'] = 'Gender'
@@ -810,44 +811,34 @@ events = pd.concat((data, events), ignore_index=True)
 # Drop duplicate events.
 events.drop_duplicates(inplace=True)
 
-# Add the legacy outcomes table used in the processed pickle.
-# Supervised latent-tag training reads targets from --latent_csv_path instead.
-adm = pd.read_csv(os.path.join(RAW_DATA_PATH,'ADMISSIONS.csv'), 
-                  usecols=['HADM_ID', 'HOSPITAL_EXPIRE_FLAG'])
-oc = icu_full[['ts_id', 'HADM_ID', 'SUBJECT_ID']].merge(adm, on='HADM_ID', how='left')
-oc = oc.rename(columns={'HOSPITAL_EXPIRE_FLAG': 'in_hospital_mortality'})
+# Canonicalize the exported artifact so it matches the PhysioNet processed pickle:
+# [ts, oc, ts_ids]
+#
+# Static verification in this file only checks the schema/interface contract. The
+# full clinical extraction still needs to be executed by the user on the real MIMIC
+# dataset to validate row counts, value coverage, and any cwd-sensitive paths.
 
+# Stage 1: raw extraction / cleaning happened above.
 
-# Get train-valid-test split for sup task.
-all_sup_subjects = icu.SUBJECT_ID.unique()
-np.random.seed(0)
-np.random.shuffle(all_sup_subjects)
-S = len(all_sup_subjects)
-bp1, bp2 = int(0.64*S), int(0.8*S)
-train_sub = all_sup_subjects[:bp1]
-valid_sub = all_sup_subjects[bp1:bp2]
-test_sub = all_sup_subjects[bp2:]
-icu.rename(columns={'ICUSTAY_ID':'ts_id'}, inplace=True)
-train_ids = np.array(icu.loc[icu.SUBJECT_ID.isin(train_sub)].ts_id)
-valid_ids = np.array(icu.loc[icu.SUBJECT_ID.isin(valid_sub)].ts_id)
-test_ids = np.array(icu.loc[icu.SUBJECT_ID.isin(test_sub)].ts_id)
+# Stage 2: canonicalize into final ts.
+# Keep TABLE only as internal extraction metadata; it must not appear in the final ts.
+ts = build_canonical_ts(events)
 
-# Filter columns.
-events = events[['ts_id', 'minute', 'variable', 'value', 'TABLE']]
+# Stage 3: canonicalize into final oc.
+admissions = pd.read_csv(
+    os.path.join(RAW_DATA_PATH, 'ADMISSIONS.csv'),
+    usecols=['HADM_ID', 'HOSPITAL_EXPIRE_FLAG'],
+)
 
-# Aggregate data.
-events['value'] = events['value'].astype(float)
-events.loc[events['TABLE'].isna(), 'TABLE'] = 'N/A'
-events = events.groupby(['ts_id', 'minute', 'variable']).agg(
-                {'value':'mean', 'TABLE':'unique'}).reset_index()
-def f(x):
-    if len(x)==0:
-        return x[0]
-    else:
-        return ','.join(x)
-events['TABLE'] = events['TABLE'].apply(f)
+# Legacy train/valid/test split export is intentionally removed from the main pickle
+# so the artifact can behave like a drop-in sibling of the PhysioNet output.
+ts_ids = build_ts_ids(ts)
+oc = build_canonical_oc(icu_full, admissions, valid_ts_ids=ts_ids)
 
-# Save data.
+# Stage 4: regenerate ts_ids from the exported ts and validate alignment.
+ts_ids = build_ts_ids(ts)
+assert_physionet_compatible_output(ts, oc, ts_ids)
+
+# Stage 5: serialize the final PhysioNet-compatible payload.
 os.makedirs('../data/processed', exist_ok=True)
-pickle.dump([events, oc, train_ids, valid_ids, test_ids], 
-            open('../data/processed/mimic_iii.pkl','wb'))
+serialize_processed_output(ts, oc, ts_ids, OUTPUT_PATH)

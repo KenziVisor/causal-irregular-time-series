@@ -30,6 +30,8 @@ This is script-first research code, not a package:
 ## Repo Map
 
 - `src/preprocess_physionet_2012.py`: raw PhysioNet files -> processed pickle. Auto-runs on import.
+- `src/preprocess_mimic_iii_large.py`: raw MIMIC-III ICU data -> processed pickle. Final exported artifact is now PhysioNet-compatible `[ts, oc, ts_ids]`; internal `TABLE`, `HADM_ID`, `SUBJECT_ID`, and legacy split arrays are not part of the main pickle.
+- `src/preprocess_mimic_iii_large_contract.py`: pure compatibility helpers for canonicalizing MIMIC exports into PhysioNet-style `ts`, `oc`, and `ts_ids`, plus strict schema validation.
 - `src/physionet2012_causal_graph.py`: builds DAG, saves graph pickle and PNG. Auto-runs on import.
 - `src/tagging_latent_variables.py`: older summary-statistics latent tagger. Auto-runs on import.
 - `src/clinically_sufficient_tagging_latent_variables.py`: newer clinical/windowed latent tagger. Guarded by `if __name__ == "__main__":`.
