@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import csv
 import pickle
 import sys
@@ -24,6 +25,7 @@ from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
+DATASET_MODEL = "physionet"
 LATENT_TAGS_PATH = "../../data/predicted_latent_tags_230326_absolute_tags.csv"
 PHYSIONET_PKL_PATH = "../../data/processed/physionet2012_ts_oc_ids.pkl"
 CATE_RESULTS_DIR = "../../data/relevant_outputs/cate_outputs_predicted_230326"
@@ -112,6 +114,38 @@ DIRECT_SENSITIVITY_SOURCE_ORDER = [
     "saved_training_params_reconstructed",
     "fallback_manual",
 ]
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Analyze saved CATE artifacts and benchmark sensitivity outputs."
+    )
+    parser.add_argument(
+        "--model",
+        choices=["physionet", "mimic"],
+        default=DATASET_MODEL,
+        help=f"Dataset selector for path defaults. Default: {DATASET_MODEL}",
+    )
+    parser.add_argument("--latent-tags-path", default=None)
+    parser.add_argument("--physionet-pkl-path", default=None)
+    parser.add_argument("--results-dir", default=None)
+    return parser.parse_args()
+
+
+def get_dataset_defaults(model: str) -> Dict[str, str | None]:
+    if model == "physionet":
+        return {
+            "latent_tags_path": LATENT_TAGS_PATH,
+            "physionet_pkl_path": PHYSIONET_PKL_PATH,
+            "results_dir": CATE_RESULTS_DIR,
+        }
+    if model == "mimic":
+        return {
+            "latent_tags_path": "mimiciii_latent_tags_output/latent_tags.csv",
+            "physionet_pkl_path": "../data/processed/mimic_iii_ts_oc_ids.pkl",
+            "results_dir": None,
+        }
+    raise ValueError(f"Unsupported model: {model!r}")
 
 
 def resolve_script_path(path_like: str | Path) -> Path:
@@ -262,6 +296,15 @@ def load_analysis_dataframe(
     physionet_pkl_path: Path,
 ) -> pd.DataFrame:
     latent_df = pd.read_csv(latent_tags_path)
+    if "ts_id" in latent_df.columns:
+        latent_df = latent_df.copy()
+    elif DATASET_MODEL == "mimic" and "icustay_id" in latent_df.columns:
+        latent_df = latent_df.rename(columns={"icustay_id": "ts_id"}).copy()
+    else:
+        raise ValueError(
+            "Latent tags CSV must contain 'ts_id', or contain 'icustay_id' when "
+            f"--model mimic is used. Source: {latent_tags_path}"
+        )
     latent_df["ts_id"] = latent_df["ts_id"].astype(str)
 
     ts, oc, _ = load_physionet_pickle(physionet_pkl_path)
@@ -2379,17 +2422,37 @@ def analyze_one_treatment(
 
 
 def main() -> None:
+    global DATASET_MODEL
     warnings.filterwarnings("ignore", category=FutureWarning)
     np.random.seed(SEED)
+    args = parse_args()
+    DATASET_MODEL = args.model
+    dataset_defaults = get_dataset_defaults(DATASET_MODEL)
 
     if TOP_K_BENCHMARK_CONFOUNDERS not in ALLOWED_TOP_K_VALUES:
         raise ValueError(
             f"TOP_K_BENCHMARK_CONFOUNDERS must be 1 or 3. Found: {TOP_K_BENCHMARK_CONFOUNDERS}"
         )
 
-    results_dir = resolve_script_path(CATE_RESULTS_DIR)
-    latent_tags_path = resolve_script_path(LATENT_TAGS_PATH)
-    physionet_pkl_path = resolve_script_path(PHYSIONET_PKL_PATH)
+    if DATASET_MODEL == "mimic" and args.results_dir is None:
+        raise ValueError(
+            "MIMIC mode requires --results-dir because this repo does not define "
+            "a relative default MIMIC results directory."
+        )
+
+    results_dir = resolve_script_path(
+        args.results_dir if args.results_dir is not None else dataset_defaults["results_dir"]
+    )
+    latent_tags_path = resolve_script_path(
+        args.latent_tags_path
+        if args.latent_tags_path is not None
+        else dataset_defaults["latent_tags_path"]
+    )
+    physionet_pkl_path = resolve_script_path(
+        args.physionet_pkl_path
+        if args.physionet_pkl_path is not None
+        else dataset_defaults["physionet_pkl_path"]
+    )
 
     treatment_dirs = sorted(path for path in results_dir.iterdir() if path.is_dir())
     run_summary_csv = build_run_output_csv(results_dir, "benchmark_summary")
