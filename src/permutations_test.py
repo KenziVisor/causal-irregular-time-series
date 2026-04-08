@@ -24,7 +24,7 @@ CATE_ESTIMATION_SCRIPT_PATH = os.path.join(SCRIPT_DIR, "cate_estimation.py")
 DATASET_MODEL = "physionet"
 TRIALS = 10
 EXPERIMENT_DIR = os.path.join(DATA_ROOT, "relevant_outputs", "permutations_test")
-LATENT_TAGS_PATH = os.path.join(DATA_ROOT, "latent_tags_clinical.csv")
+LATENT_TAGS_PATH = os.path.join(DATA_ROOT, "predicted_latent_tags_230326_absolute_tags.csv")
 PHYSIONET_PKL_PATH = os.path.join(DATA_ROOT, "processed", "physionet2012_ts_oc_ids.pkl")
 GRAPH_PKL_PATH = os.path.join(DATA_ROOT, "causal_graph.pkl")
 MODEL_TYPE = "CausalForest"
@@ -402,7 +402,7 @@ def shuffle_outcome_column(
 
     if OUTCOME_COL not in oc.columns:
         raise ValueError(
-            f"Outcome column {OUTCOME_COL!r} was not found in PhysioNet pickle: "
+            f"Outcome column {OUTCOME_COL!r} was not found in the processed pickle: "
             f"{physionet_pkl_path}"
         )
 
@@ -622,7 +622,7 @@ def run_outcome_permutation_experiment(
             prefix=f"outcome_perm_{trial_index:04d}_",
             dir=experiment_dir,
         ) as temp_dir:
-            temp_physionet_pkl_path = os.path.join(temp_dir, "physionet_outcome_permuted.pkl")
+            temp_physionet_pkl_path = os.path.join(temp_dir, "processed_outcome_permuted.pkl")
             temp_output_dir = os.path.join(temp_dir, "cate_run")
 
             shuffle_outcome_column(
@@ -699,6 +699,11 @@ def main() -> None:
         raise ValueError(
             "MIMIC mode requires --graph-pkl-path because this repo does not define "
             "a relative default MIMIC graph pickle path."
+        )
+    if DATASET_MODEL == "mimic" and args.experiment_dir is None:
+        raise ValueError(
+            "MIMIC mode requires --experiment-dir because this repo does not define "
+            "a safe default MIMIC experiment directory and the PhysioNet default would collide."
         )
     latent_tags_path = resolve_runtime_path(
         args.latent_tags_path,

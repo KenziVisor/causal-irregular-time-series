@@ -36,6 +36,7 @@ def parse_args():
     )
     parser.add_argument("--latent-tags-path", default=None)
     parser.add_argument("--physionet-pkl-path", default=None)
+    parser.add_argument("--results-txt-path", default=None)
     return parser.parse_args()
 
 
@@ -44,11 +45,13 @@ def get_dataset_defaults(model: str):
         return {
             "latent_tags_path": latent_tags_csv_path,
             "physionet_pkl_path": physionet_ts_oc_ids_pkl_path,
+            "results_txt_path": results_txt_path,
         }
     if model == "mimic":
         return {
             "latent_tags_path": "mimiciii_latent_tags_output/latent_tags.csv",
             "physionet_pkl_path": "../data/processed/mimic_iii_ts_oc_ids.pkl",
+            "results_txt_path": None,
         }
     raise ValueError(f"Unsupported model: {model!r}")
 
@@ -65,6 +68,20 @@ def resolve_runtime_path(cli_value: str | None, default_value: str, field_name: 
     if not os.path.isfile(resolved_path):
         raise FileNotFoundError(f"{field_name} is not a file: {resolved_path}")
     return resolved_path
+
+
+def resolve_output_path(
+    cli_value: str | None,
+    default_value: str | None,
+    field_name: str,
+) -> str:
+    raw_value = cli_value if cli_value is not None else default_value
+    if raw_value is None:
+        raise ValueError(f"{field_name} is not configured. Provide an explicit output path.")
+    raw_value = raw_value.strip()
+    if not raw_value:
+        raise ValueError(f"{field_name} is empty. Provide a non-empty path.")
+    return os.path.abspath(os.path.expanduser(raw_value))
 
 
 def load_latents_and_outcomes(latent_tags_csv_path: str, physionet_ts_oc_ids_pkl_path: str) -> pd.DataFrame:
@@ -248,6 +265,7 @@ def train_mlp(X_train, y_train, X_val, y_val, seed=42, epochs=50, batch_size=256
 def run_mortality_from_latents(
     latent_tags_csv_path: str,
     physionet_ts_oc_ids_pkl_path: str,
+    results_txt_path: str,
     test_size: float = 0.2,
     val_size: float = 0.2,
     seed: int = 42,
@@ -299,6 +317,10 @@ def run_mortality_from_latents(
     # Save results to TXT
     # =========================
 
+    results_dir = os.path.dirname(results_txt_path)
+    if results_dir:
+        os.makedirs(results_dir, exist_ok=True)
+
     with open(results_txt_path, "w") as f:
         f.write("=== Mortality Prediction From Latent Variables ===\n\n")
 
@@ -336,6 +358,11 @@ def main():
     args = parse_args()
     DATASET_MODEL = args.model
     dataset_defaults = get_dataset_defaults(DATASET_MODEL)
+    if DATASET_MODEL == "mimic" and args.results_txt_path is None:
+        raise ValueError(
+            "MIMIC mode requires --results-txt-path because this repo does not define "
+            "a safe default MIMIC results file and the PhysioNet default would collide."
+        )
     latent_path = resolve_runtime_path(
         args.latent_tags_path,
         dataset_defaults["latent_tags_path"],
@@ -346,10 +373,13 @@ def main():
         dataset_defaults["physionet_pkl_path"],
         "PHYSIONET_PKL_PATH",
     )
-    return run_mortality_from_latents(latent_path, physionet_pkl_path)
+    results_path = resolve_output_path(
+        args.results_txt_path,
+        dataset_defaults["results_txt_path"],
+        "RESULTS_TXT_PATH",
+    )
+    return run_mortality_from_latents(latent_path, physionet_pkl_path, results_path)
 
 
 if __name__ == "__main__":
-    out = main()
-else:
-    out = run_mortality_from_latents(latent_tags_csv_path, physionet_ts_oc_ids_pkl_path)
+    main()
