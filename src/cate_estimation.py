@@ -557,14 +557,14 @@ def log_environment_metadata(env_metadata: Dict[str, object]) -> None:
 def log_runtime_configuration(
     *,
     latent_tags_path: str,
-    physionet_pkl_path: str,
+    processed_pkl_path: str,
     graph_pkl_path: str,
     output_dir: str,
     runtime_device_info: Dict[str, object],
 ) -> None:
     print("Runtime configuration:")
     print(f"  latent_tags_path: {latent_tags_path}")
-    print(f"  physionet_pkl_path: {physionet_pkl_path}")
+    print(f"  processed_pkl_path: {processed_pkl_path}")
     print(f"  graph_pkl_path: {graph_pkl_path}")
     print(f"  output_dir: {output_dir}")
     print(
@@ -1365,11 +1365,17 @@ def choose_effect_modifiers(
     Keep X compact and stable.
     You can change this later, but this is a sane default.
     """
-    preferred = [
-        "Age", "Gender", "Weight",
-        "ICUType_1", "ICUType_2", "ICUType_3", "ICUType_4",
-        "ChronicRisk", "AcuteInsult"
-    ]
+    if DATASET_MODEL == "mimic":
+        preferred = [
+            "Age", "Gender", "Weight",
+            "ChronicBurden", "AcuteInsult",
+        ]
+    else:
+        preferred = [
+            "Age", "Gender", "Weight",
+            "ICUType_1", "ICUType_2", "ICUType_3", "ICUType_4",
+            "ChronicRisk", "AcuteInsult",
+        ]
     return [c for c in preferred if c in df.columns and c != treatment and c != OUTCOME_COL]
 
 
@@ -2307,6 +2313,11 @@ def main():
             "MIMIC mode requires --graph-pkl-path because this repo does not define "
             "a relative default MIMIC graph pickle path."
         )
+    if DATASET_MODEL == "mimic" and args.output_dir is None:
+        raise ValueError(
+            "MIMIC mode requires --output-dir because this repo does not define "
+            "a safe default MIMIC output directory and the PhysioNet default would collide."
+        )
 
     GRAPH_OUTCOME_NODE = str(dataset_defaults["graph_outcome_node"])
     TREATMENTS = list(dataset_defaults["treatments"])
@@ -2340,7 +2351,7 @@ def main():
     runtime_device_info = detect_runtime_device()
     log_runtime_configuration(
         latent_tags_path=LATENT_TAGS_PATH,
-        physionet_pkl_path=PHYSIONET_PKL_PATH,
+        processed_pkl_path=PHYSIONET_PKL_PATH,
         graph_pkl_path=GRAPH_PKL_PATH,
         output_dir=OUTPUT_DIR,
         runtime_device_info=runtime_device_info,

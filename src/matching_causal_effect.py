@@ -134,17 +134,27 @@ def load_graph(path: str) -> nx.DiGraph:
     return G
 
 
-def build_background_features(ts: pd.DataFrame) -> pd.DataFrame:
+def build_background_features(
+    ts: pd.DataFrame,
+    dataset_model: str | None = None,
+) -> pd.DataFrame:
     """
     Build patient-level observed background covariates from ts.
-    Preprocessing already converts ICUType into ICUType_1..ICUType_4.
+    PhysioNet preprocessing converts ICUType into ICUType_1..ICUType_4.
+    MIMIC does not guarantee those columns, so only keep what is actually present.
     """
+    current_model = DATASET_MODEL if dataset_model is None else dataset_model
     df = ts.copy().sort_values(["ts_id", "minute"])
 
-    keep_vars = [
-        "Age", "Gender", "Weight",
-        "ICUType_1", "ICUType_2", "ICUType_3", "ICUType_4"
-    ]
+    keep_vars = ["Age", "Gender", "Weight"]
+    if current_model == "physionet":
+        keep_vars += ["ICUType_1", "ICUType_2", "ICUType_3", "ICUType_4"]
+    else:
+        available_variables = set(df["variable"].astype(str).tolist())
+        keep_vars += [
+            col for col in ["ICUType_1", "ICUType_2", "ICUType_3", "ICUType_4"]
+            if col in available_variables
+        ]
     df = df[df["variable"].isin(keep_vars)].copy()
 
     first_vals = (
@@ -154,9 +164,10 @@ def build_background_features(ts: pd.DataFrame) -> pd.DataFrame:
 
     bg = first_vals.pivot(index="ts_id", columns="variable", values="value").reset_index()
 
-    for col in ["ICUType_1", "ICUType_2", "ICUType_3", "ICUType_4"]:
-        if col not in bg.columns:
-            bg[col] = 0.0
+    if current_model == "physionet":
+        for col in ["ICUType_1", "ICUType_2", "ICUType_3", "ICUType_4"]:
+            if col not in bg.columns:
+                bg[col] = 0.0
 
     return bg
 
@@ -178,12 +189,27 @@ def load_analysis_dataframe(
     latent_df["ts_id"] = latent_df["ts_id"].astype(str)
 
     ts, oc, _ = load_physionet_pickle(physionet_pkl_path)
+    if OUTCOME_COL not in oc.columns:
+        raise ValueError(
+            f"Processed pickle is missing outcome column '{OUTCOME_COL}'. "
+            f"Available oc columns: {list(oc.columns)}"
+        )
 
-    oc_small = oc[["ts_id", OUTCOME_COL]].copy()
+    if OUTCOME_COL in latent_df.columns:
+        latent_df = latent_df.drop(columns=[OUTCOME_COL])
+
+    oc_small = oc[["ts_id", OUTCOME_COL]].copy().drop_duplicates(subset=["ts_id"])
     oc_small["ts_id"] = oc_small["ts_id"].astype(str)
 
-    bg_df = build_background_features(ts)
+    bg_df = build_background_features(ts, dataset_model=DATASET_MODEL)
     bg_df["ts_id"] = bg_df["ts_id"].astype(str)
+
+    latent_bg_overlap = [
+        column for column in bg_df.columns
+        if column != "ts_id" and column in latent_df.columns
+    ]
+    if latent_bg_overlap:
+        latent_df = latent_df.drop(columns=latent_bg_overlap)
 
     df = latent_df.merge(oc_small, on="ts_id", how="inner")
     df = df.merge(bg_df, on="ts_id", how="left")
@@ -939,6 +965,11 @@ def main():
         raise ValueError(
             "MIMIC mode requires --graph-pkl-path because this repo does not define "
             "a relative default MIMIC graph pickle path."
+        )
+    if DATASET_MODEL == "mimic" and args.output_dir is None:
+        raise ValueError(
+            "MIMIC mode requires --output-dir because this repo does not define "
+            "a safe default MIMIC output directory and the PhysioNet default would collide."
         )
 
     GRAPH_OUTCOME_NODE = str(dataset_defaults["graph_outcome_node"])

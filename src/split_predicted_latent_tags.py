@@ -88,13 +88,13 @@ def split_predicted_latent_tags(
 
 def main() -> None:
     args = parse_args()
-    if args.model == "mimic" and args.input_csv is None:
+    if args.input_csv is None:
         raise ValueError(
-            "MIMIC mode requires --input-csv because this repo does not define "
-            "or verify a default combined MIMIC predicted-latents CSV."
+            "Provide --input-csv because this repo does not define a safe checked-in "
+            "default combined predicted-latents CSV."
         )
 
-    input_csv = Path(args.input_csv) if args.input_csv is not None else INPUT_CSV
+    input_csv = Path(args.input_csv)
 
     if not input_csv.exists():
         raise FileNotFoundError(f"Input CSV not found: {input_csv}")

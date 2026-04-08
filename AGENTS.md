@@ -32,6 +32,7 @@ This is script-first research code, not a package:
 - `src/preprocess_physionet_2012.py`: raw PhysioNet files -> processed pickle. Auto-runs on import.
 - `src/preprocess_mimic_iii_large.py`: raw MIMIC-III ICU data -> processed pickle. Final exported artifact is now PhysioNet-compatible `[ts, oc, ts_ids]`; internal `TABLE`, `HADM_ID`, `SUBJECT_ID`, and legacy split arrays are not part of the main pickle.
 - `src/preprocess_mimic_iii_large_contract.py`: pure compatibility helpers for canonicalizing MIMIC exports into PhysioNet-style `ts`, `oc`, and `ts_ids`, plus strict schema validation.
+- `src/tagging_latent_variables_mimiciii.py`: rule-based MIMIC latent tagger. Supports summary CSV, raw concept CSVs, and canonical `[ts, oc, ts_ids]` pickle input; pickle mode reconstructs only the rule-needed summary fields from canonical `ts`/`oc`, with key aliases such as `MBP -> MAP`, `PCO2 -> PaCO2`, `PO2 -> PaO2`, `O2 Saturation -> SpO2`, `Creatinine Blood -> Creatinine`, and `Bilirubin (Total) -> Bilirubin`, and computes `GCS_min` from `GCS_eye`, `GCS_motor`, `GCS_verbal`.
 - `src/physionet2012_causal_graph.py`: builds DAG, saves graph pickle and PNG. Auto-runs on import.
 - `src/tagging_latent_variables.py`: older summary-statistics latent tagger. Auto-runs on import.
 - `src/clinically_sufficient_tagging_latent_variables.py`: newer clinical/windowed latent tagger. Guarded by `if __name__ == "__main__":`.
