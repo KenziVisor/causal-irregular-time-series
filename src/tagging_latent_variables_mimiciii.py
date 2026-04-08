@@ -59,6 +59,8 @@ from typing import Callable, Dict, Iterable, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from preprocess_mimic_iii_large_contract import canonicalize_stay_id_series
+
 
 # ============================================================
 # Configuration
@@ -581,16 +583,23 @@ def load_mimic_pickle_payload(pkl_path: str) -> Tuple[pd.DataFrame, pd.DataFrame
     require_columns(oc, ["ts_id"], "oc")
 
     ts = ts.loc[:, ["ts_id", "minute", "variable", "value"]].copy()
-    ts["ts_id"] = ts["ts_id"].astype(str)
+    ts["ts_id"] = canonicalize_stay_id_series(ts["ts_id"])
+    if ts["ts_id"].isna().any():
+        raise ValueError("Pickle ts contains missing ts_id values after canonicalization.")
     ts["minute"] = pd.to_numeric(ts["minute"], errors="raise").astype(int)
     ts["variable"] = ts["variable"].astype(str)
     ts["value"] = pd.to_numeric(ts["value"], errors="coerce")
     ts = ts.sort_values(["ts_id", "minute", "variable"]).reset_index(drop=True)
 
     oc = oc.copy()
-    oc["ts_id"] = oc["ts_id"].astype(str)
+    oc["ts_id"] = canonicalize_stay_id_series(oc["ts_id"])
+    if oc["ts_id"].isna().any():
+        raise ValueError("Pickle oc contains missing ts_id values after canonicalization.")
 
-    ts_ids = [str(ts_id) for ts_id in ts_ids]
+    ts_ids_series = canonicalize_stay_id_series(pd.Series(list(ts_ids), dtype="object"))
+    if ts_ids_series.isna().any():
+        raise ValueError("Pickle ts_ids contains missing values after canonicalization.")
+    ts_ids = ts_ids_series.tolist()
     if ts_ids != sorted(ts_ids):
         raise ValueError("ts_ids in the pickle must be sorted.")
 
@@ -603,6 +612,24 @@ def load_mimic_pickle_payload(pkl_path: str) -> Tuple[pd.DataFrame, pd.DataFrame
         raise ValueError("All oc.ts_id values must be contained in ts_ids.")
 
     return ts, oc, ts_ids
+
+
+def validate_mimic_pickle_summary(summary_df: pd.DataFrame) -> None:
+    if "InHospitalMortality" not in summary_df.columns:
+        raise ValueError(
+            "Processed MIMIC pickle is broken: summary construction could not recover "
+            "InHospitalMortality from oc. Regenerate the processed MIMIC pickle and "
+            "then regenerate the MIMIC latent tags."
+        )
+
+    outcome = pd.to_numeric(summary_df["InHospitalMortality"], errors="coerce")
+    if int(outcome.notna().sum()) == 0:
+        raise ValueError(
+            "Processed MIMIC pickle is broken: merged InHospitalMortality is entirely "
+            "missing after aligning ts_ids with oc. A known cause is misaligned stay "
+            "identifiers such as '12345.0' versus '12345'. Regenerate the processed "
+            "MIMIC pickle and then regenerate the MIMIC latent tags."
+        )
 
 
 def _aggregate_minimal_summary_stats_from_ts(ts: pd.DataFrame) -> pd.DataFrame:
@@ -760,7 +787,7 @@ def build_summary_df_from_ts_oc(
     oc: pd.DataFrame,
     ts_ids: List[str],
 ) -> pd.DataFrame:
-    summary = pd.DataFrame({"icustay_id": [str(ts_id) for ts_id in ts_ids]})
+    summary = pd.DataFrame({"icustay_id": ts_ids})
 
     summary = summary.merge(_aggregate_minimal_summary_stats_from_ts(ts), on="icustay_id", how="left")
     summary = summary.merge(_aggregate_gcs_min_from_ts(ts), on="icustay_id", how="left")
@@ -789,6 +816,7 @@ def build_summary_df_from_ts_oc(
         if col not in summary.columns:
             summary[col] = np.nan
 
+    validate_mimic_pickle_summary(summary)
     return summary
 
 

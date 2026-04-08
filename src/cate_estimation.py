@@ -15,6 +15,7 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 from econml.dml import CausalForestDML, LinearDML
+from preprocess_mimic_iii_large_contract import canonicalize_stay_id_series
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 
 
@@ -653,6 +654,10 @@ def log_non_null_counts(
             print(f"  {column}: MISSING")
 
 
+def sample_ts_ids(values: Set[str], limit: int = 5) -> List[str]:
+    return sorted(str(value) for value in values)[:limit]
+
+
 def find_merge_style_variants(
     available_columns: List[str],
     expected_column: str,
@@ -784,7 +789,9 @@ def load_analysis_dataframe(
             "Latent tags CSV must contain 'ts_id', or contain 'icustay_id' when "
             f"--model mimic is used. Source: {latent_tags_path}"
         )
-    latent_df["ts_id"] = latent_df["ts_id"].astype(str)
+    latent_df["ts_id"] = canonicalize_stay_id_series(latent_df["ts_id"])
+    if latent_df["ts_id"].isna().any():
+        raise ValueError("Latent tags contain missing ts_id values after canonicalization.")
     latent_df = normalize_expected_columns(
         latent_df,
         list(TREATMENTS),
@@ -793,6 +800,14 @@ def load_analysis_dataframe(
     log_dataframe_columns("latent_df_normalized", latent_df)
 
     ts, oc, _ = load_physionet_pickle(physionet_pkl_path)
+    ts = ts.copy()
+    ts["ts_id"] = canonicalize_stay_id_series(ts["ts_id"])
+    if ts["ts_id"].isna().any():
+        raise ValueError("Processed pickle ts contains missing ts_id values after canonicalization.")
+    oc = oc.copy()
+    oc["ts_id"] = canonicalize_stay_id_series(oc["ts_id"])
+    if oc["ts_id"].isna().any():
+        raise ValueError("Processed pickle oc contains missing ts_id values after canonicalization.")
     if OUTCOME_COL not in oc.columns:
         raise ValueError(
             f"Processed pickle is missing outcome column '{OUTCOME_COL}'. "
@@ -808,10 +823,14 @@ def load_analysis_dataframe(
         latent_df = latent_df.drop(columns=[OUTCOME_COL])
 
     oc_small = oc[["ts_id", OUTCOME_COL]].copy().drop_duplicates(subset=["ts_id"])
-    oc_small["ts_id"] = oc_small["ts_id"].astype(str)
+    oc_small["ts_id"] = canonicalize_stay_id_series(oc_small["ts_id"])
+    if oc_small["ts_id"].isna().any():
+        raise ValueError("Processed pickle oc_small contains missing ts_id values after canonicalization.")
 
     bg_df = build_background_features(ts, dataset_model=current_model)
-    bg_df["ts_id"] = bg_df["ts_id"].astype(str)
+    bg_df["ts_id"] = canonicalize_stay_id_series(bg_df["ts_id"])
+    if bg_df["ts_id"].isna().any():
+        raise ValueError("Background features contain missing ts_id values after canonicalization.")
     log_dataframe_columns("bg_df", bg_df)
 
     latent_bg_overlap = [
@@ -825,6 +844,32 @@ def load_analysis_dataframe(
             f"{latent_bg_overlap}"
         )
         latent_df = latent_df.drop(columns=latent_bg_overlap)
+
+    latent_ids = set(latent_df["ts_id"].dropna().tolist())
+    oc_ids = set(oc_small["ts_id"].dropna().tolist())
+    overlapping_ids = latent_ids & oc_ids
+    only_latent_ids = latent_ids - oc_ids
+    only_oc_ids = oc_ids - latent_ids
+    print("[load_analysis_dataframe] ts_id overlap diagnostics:")
+    print(f"  latent_df unique ids: {len(latent_ids)}")
+    print(f"  oc_small unique ids: {len(oc_ids)}")
+    print(f"  overlapping ids: {len(overlapping_ids)}")
+    print(f"  sample only in latent_df: {sample_ts_ids(only_latent_ids)}")
+    print(f"  sample only in oc_small: {sample_ts_ids(only_oc_ids)}")
+
+    if oc_small.empty or not overlapping_ids:
+        if current_model == "mimic":
+            raise ValueError(
+                "Processed MIMIC pickle and latent tags are misaligned: there are no "
+                "overlapping ts_id values between latent tags and oc. A known cause is "
+                "float-style stay identifiers such as '12345.0' versus '12345'. "
+                "Regenerate the processed MIMIC pickle and then regenerate the MIMIC "
+                "latent tags CSV."
+            )
+        raise ValueError(
+            "Processed pickle and latent tags are misaligned: there are no overlapping "
+            "ts_id values between latent tags and oc."
+        )
 
     df = latent_df.merge(oc_small, on="ts_id", how="inner")
     df = df.merge(bg_df, on="ts_id", how="left")

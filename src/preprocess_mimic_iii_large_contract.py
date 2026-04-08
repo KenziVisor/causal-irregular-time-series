@@ -16,12 +16,34 @@ def _require_columns(df: pd.DataFrame, required_columns: list[str], df_name: str
         raise KeyError(f"{df_name} is missing required columns: {missing}")
 
 
+def canonicalize_stay_id_series(series: pd.Series) -> pd.Series:
+    out = pd.Series(pd.NA, index=series.index, dtype="object")
+    if series.empty:
+        return out
+
+    non_missing = series.notna()
+    if not non_missing.any():
+        return out
+
+    trimmed = series.loc[non_missing].astype(str).str.strip()
+    trimmed = trimmed.mask(trimmed == "", pd.NA)
+    numeric = pd.to_numeric(trimmed, errors="coerce")
+    integer_like = numeric.notna() & ((numeric % 1).abs() < 1e-9)
+
+    normalized = trimmed.astype("object")
+    normalized.loc[integer_like] = numeric.loc[integer_like].astype("Int64").astype(str)
+    out.loc[non_missing] = normalized
+    return out
+
+
 def build_canonical_ts(events_df: pd.DataFrame) -> pd.DataFrame:
     """Collapse extracted MIMIC events into the PhysioNet-style time-series schema."""
     _require_columns(events_df, CANONICAL_TS_COLUMNS, "events_df")
 
     ts = events_df.loc[:, CANONICAL_TS_COLUMNS].copy()
-    ts["ts_id"] = ts["ts_id"].astype(str)
+    ts["ts_id"] = canonicalize_stay_id_series(ts["ts_id"])
+    if ts["ts_id"].isna().any():
+        raise ValueError("events_df contains missing ts_id values after canonicalization.")
     ts["minute"] = pd.to_numeric(ts["minute"], errors="raise").astype(int)
     ts["variable"] = ts["variable"].astype(str)
     ts["value"] = pd.to_numeric(ts["value"], errors="raise").astype(float)
@@ -48,7 +70,9 @@ def build_canonical_oc(
     _require_columns(admissions_df, ["HADM_ID", "HOSPITAL_EXPIRE_FLAG"], "admissions_df")
 
     icu = icu_full_df.loc[:, ["ts_id", "HADM_ID", "INTIME", "OUTTIME"]].copy()
-    icu["ts_id"] = icu["ts_id"].astype(str)
+    icu["ts_id"] = canonicalize_stay_id_series(icu["ts_id"])
+    if icu["ts_id"].isna().any():
+        raise ValueError("icu_full_df contains missing ts_id values after canonicalization.")
     icu["INTIME"] = pd.to_datetime(icu["INTIME"])
     icu["OUTTIME"] = pd.to_datetime(icu["OUTTIME"])
     icu["length_of_stay"] = (icu["OUTTIME"] - icu["INTIME"]).dt.total_seconds() / (24 * 60 * 60)
@@ -61,7 +85,12 @@ def build_canonical_oc(
     oc = oc.loc[:, CANONICAL_OC_COLUMNS].drop_duplicates(subset=["ts_id"])
 
     if valid_ts_ids is not None:
-        valid_ts_ids = {str(ts_id) for ts_id in valid_ts_ids}
+        valid_ts_ids_series = canonicalize_stay_id_series(
+            pd.Series(list(valid_ts_ids), dtype="object")
+        )
+        if valid_ts_ids_series.isna().any():
+            raise ValueError("valid_ts_ids contains missing values after canonicalization.")
+        valid_ts_ids = set(valid_ts_ids_series.tolist())
         oc = oc.loc[oc["ts_id"].isin(valid_ts_ids)]
 
     return oc.sort_values("ts_id").reset_index(drop=True)
@@ -69,7 +98,10 @@ def build_canonical_oc(
 
 def build_ts_ids(ts_df: pd.DataFrame) -> list[str]:
     _require_columns(ts_df, ["ts_id"], "ts_df")
-    return sorted(ts_df["ts_id"].astype(str).unique().tolist())
+    ts_ids = canonicalize_stay_id_series(ts_df["ts_id"])
+    if ts_ids.isna().any():
+        raise ValueError("ts_df contains missing ts_id values after canonicalization.")
+    return sorted(ts_ids.unique().tolist())
 
 
 def assert_physionet_compatible_output(
@@ -95,12 +127,20 @@ def assert_physionet_compatible_output(
     missing_oc_columns = [column for column in REQUIRED_OC_COLUMNS if column not in oc.columns]
     if missing_oc_columns:
         raise AssertionError(f"oc is missing required columns: {missing_oc_columns}.")
+    if oc.empty:
+        raise AssertionError("oc must not be empty.")
     if list(oc.columns) != CANONICAL_OC_COLUMNS:
         raise AssertionError(f"oc columns must be exactly {CANONICAL_OC_COLUMNS}, got {list(oc.columns)}.")
     forbidden_oc_columns = {"HADM_ID", "SUBJECT_ID", "TABLE"} & set(oc.columns)
     if forbidden_oc_columns:
         raise AssertionError(f"oc must not expose MIMIC-specific identifiers: {sorted(forbidden_oc_columns)}.")
+    if int(pd.to_numeric(oc["in_hospital_mortality"], errors="coerce").notna().sum()) == 0:
+        raise AssertionError("oc.in_hospital_mortality must contain at least one non-missing value.")
 
+    canonical_ts_ids = canonicalize_stay_id_series(pd.Series(list(ts_ids), dtype="object"))
+    if canonical_ts_ids.isna().any():
+        raise AssertionError("ts_ids must not contain missing values.")
+    ts_ids = canonical_ts_ids.tolist()
     if ts_ids != sorted(ts_ids):
         raise AssertionError("ts_ids must be sorted.")
 
@@ -109,9 +149,17 @@ def assert_physionet_compatible_output(
         raise AssertionError("ts_ids must equal sorted(ts.ts_id.unique()).")
 
     ts_id_set = set(ts_ids_from_ts)
-    oc_id_set = set(oc["ts_id"].astype(str))
+    oc_ids = canonicalize_stay_id_series(oc["ts_id"])
+    if oc_ids.isna().any():
+        raise AssertionError("oc.ts_id must not contain missing values.")
+    oc_id_set = set(oc_ids.tolist())
+    overlap = oc_id_set & ts_id_set
+    if not overlap:
+        raise AssertionError("oc.ts_id has zero overlap with ts_ids after canonicalization.")
     if not oc_id_set.issubset(ts_id_set):
         raise AssertionError("All oc.ts_id values must be contained in ts_ids.")
+    if oc_id_set != ts_id_set:
+        raise AssertionError("Exported oc.ts_id values must exactly match ts_ids for the canonical MIMIC artifact.")
     if set(ts["ts_id"].astype(str)) != ts_id_set:
         raise AssertionError("All ts.ts_id values must be represented in ts_ids.")
 

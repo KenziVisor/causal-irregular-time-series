@@ -774,9 +774,6 @@ events['rel_charttime'] = events.CHARTTIME-events.INTIME
 events.drop(columns=['INTIME', 'CHARTTIME'], inplace=True)
 events.rel_charttime = events.rel_charttime.dt.total_seconds()//60
 
-# Save current icu table.
-icu_full = icu.copy()
-
 # Get icustays which lasted for atleast 24 hours.
 icu = icu.loc[(icu.OUTTIME-icu.INTIME)>=pd.Timedelta(24,'h')]
 
@@ -789,17 +786,19 @@ icu = icu.loc[((icu.DEATHTIME-icu.INTIME)>=pd.Timedelta(24,'h'))|icu.DEATHTIME.i
 
 # Get icustays with aleast one event in first 24h.
 icu = icu.loc[icu.ICUSTAY_ID.isin(events.loc[events.rel_charttime<24*60].ICUSTAY_ID)]
+final_icu = icu.copy()
+events = events.loc[events.ICUSTAY_ID.isin(final_icu.ICUSTAY_ID)].copy()
 
 # Rename some columns.
 events.rename(columns={'rel_charttime':'minute', 'NAME':'variable', 
                        'VALUENUM':'value', 'ICUSTAY_ID':'ts_id'}, inplace=True)
 
 # Add gender and age.
-icu_full.rename(columns={'ICUSTAY_ID':'ts_id'}, inplace=True)
-data_age = icu_full[['ts_id', 'AGE']].copy()
+final_icu.rename(columns={'ICUSTAY_ID':'ts_id'}, inplace=True)
+data_age = final_icu[['ts_id', 'AGE']].copy()
 data_age['variable'] = 'Age'
 data_age.rename(columns={'AGE':'value'}, inplace=True)
-data_gen = icu_full[['ts_id', 'GENDER']].copy()
+data_gen = final_icu[['ts_id', 'GENDER']].copy()
 data_gen.loc[data_gen.GENDER=='M', 'GENDER'] = 0
 data_gen.loc[data_gen.GENDER=='F', 'GENDER'] = 1
 data_gen['variable'] = 'Gender'
@@ -833,7 +832,7 @@ admissions = pd.read_csv(
 # Legacy train/valid/test split export is intentionally removed from the main pickle
 # so the artifact can behave like a drop-in sibling of the PhysioNet output.
 ts_ids = build_ts_ids(ts)
-oc = build_canonical_oc(icu_full, admissions, valid_ts_ids=ts_ids)
+oc = build_canonical_oc(final_icu, admissions, valid_ts_ids=ts_ids)
 
 # Stage 4: regenerate ts_ids from the exported ts and validate alignment.
 ts_ids = build_ts_ids(ts)
