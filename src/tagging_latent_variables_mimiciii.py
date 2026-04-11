@@ -1363,6 +1363,25 @@ def build_validation_summary(
 # Saving
 # ============================================================
 
+def _prepare_output_df_with_ts_id(df: pd.DataFrame, df_name: str) -> pd.DataFrame:
+    if "icustay_id" not in df.columns:
+        raise ValueError(f"{df_name} must contain icustay_id before saving outputs.")
+
+    output_df = df.copy()
+    if "ts_id" in output_df.columns:
+        existing_ts_id = canonicalize_stay_id_series(output_df["ts_id"])
+        internal_ids = canonicalize_stay_id_series(output_df["icustay_id"])
+        mismatch = existing_ts_id.notna() & internal_ids.notna() & (existing_ts_id != internal_ids)
+        if bool(mismatch.any()):
+            raise ValueError(
+                f"{df_name} contains both ts_id and icustay_id with conflicting values; "
+                "cannot standardize output schema safely."
+            )
+        output_df = output_df.drop(columns=["ts_id"])
+
+    return output_df.rename(columns={"icustay_id": "ts_id"})
+
+
 def save_outputs(
     output_dir: str,
     summary_df: pd.DataFrame,
@@ -1381,8 +1400,11 @@ def save_outputs(
     validation_path = os.path.join(output_dir, "validation_summary.json")
 
     print(f"      Saving output files under: {os.path.abspath(output_dir)}")
-    latent_df.to_csv(tags_path, index=False)
-    summary_df.merge(latent_df, on="icustay_id", how="left").to_csv(merged_path, index=False)
+    output_summary_df = _prepare_output_df_with_ts_id(summary_df, "summary_df")
+    output_latent_df = _prepare_output_df_with_ts_id(latent_df, "latent_df")
+
+    output_latent_df.to_csv(tags_path, index=False)
+    output_summary_df.merge(output_latent_df, on="ts_id", how="left").to_csv(merged_path, index=False)
     prevalence_table(latent_df).to_csv(prevalence_path, index=False)
     mortality_by_tag_table(latent_df, summary_df).to_csv(mortality_path, index=False)
     cooccurrence_phi_table(latent_df).to_csv(cooccur_path)
