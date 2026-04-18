@@ -1,0 +1,61 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Test and tool cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environments
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# Editors and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Orchestrated pipeline outputs when run from the repo root
+/logs/
+/run_summary.json
+/graph/
+/majority_vote/
+/mortality_prediction/
+/matching/
+/cate_estimation/
+/analyze_cate_results/
+/permutations_test/
+/run_*/
+/matching_outputs/
+
+# Same outputs when scripts are launched from src/
+/src/logs/
+/src/run_summary.json
+/src/graph/
+/src/majority_vote/
+/src/mortality_prediction/
+/src/matching/
+/src/cate_estimation/
+/src/analyze_cate_results/
+/src/permutations_test/
+/src/run_*/
+/src/matching_outputs/
+
+# Standalone script artifacts
+/latent_tags*.csv
+/latent_tags*_trees.pkl
+/latent_tags*_stages.csv
+/clinical_mortality_prediction_results.txt
+/mortality_prediction_results_optimized.txt
+/optimal_thresholds.txt
+/src/latent_tags*.csv
+/src/latent_tags*_trees.pkl
+/src/latent_tags*_stages.csv
+/src/clinical_mortality_prediction_results.txt
+/src/mortality_prediction_results_optimized.txt
+/src/optimal_thresholds.txt
