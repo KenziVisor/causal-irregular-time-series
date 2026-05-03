@@ -30,11 +30,9 @@ import pandas as pd
 from econml.dml import CausalForestDML, LinearDML
 from dataset_config import (
     get_config_bool,
-    get_config_float,
     get_config_int,
     get_config_list,
     get_config_scalar,
-    get_first_available,
     load_dataset_config,
 )
 from scipy.stats import norm
@@ -157,7 +155,13 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--latent-tags-path", default=None)
-    parser.add_argument("--physionet-pkl-path", default=None)
+    parser.add_argument(
+        "--dataset-pkl-path",
+        "--physionet-pkl-path",
+        dest="dataset_pkl_path",
+        default=None,
+        help="Path to the processed dataset pickle. --physionet-pkl-path is a deprecated alias.",
+    )
     parser.add_argument("--results-dir", default=None)
     parser.add_argument(
         "--output-dir",
@@ -2522,68 +2526,15 @@ def main() -> None:
     PREFERRED_ENV_NAME = str(
         get_config_scalar(config, "PREFERRED_ENV_NAME", PREFERRED_ENV_NAME)
     )
-    TOP_K_BENCHMARK_CONFOUNDERS = int(
-        get_config_int(
-            config,
-            "TOP_K_BENCHMARK_CONFOUNDERS",
-            TOP_K_BENCHMARK_CONFOUNDERS,
-        )
-        or TOP_K_BENCHMARK_CONFOUNDERS
-    )
     SEED = int(get_config_int(config, "SEED", SEED) or SEED)
     SAVE_CONTOUR_PLOT = bool(
         get_config_bool(config, "SAVE_CONTOUR_PLOT", SAVE_CONTOUR_PLOT)
     )
     OUTCOME_COL = str(get_config_scalar(config, "OUTCOME_COL", OUTCOME_COL))
-    DEFAULT_SENSITIVITY_ALPHA = float(
-        get_config_float(config, "DEFAULT_SENSITIVITY_ALPHA", DEFAULT_SENSITIVITY_ALPHA)
-        or DEFAULT_SENSITIVITY_ALPHA
-    )
-    DEFAULT_SENSITIVITY_C_Y = float(
-        get_config_float(config, "DEFAULT_SENSITIVITY_C_Y", DEFAULT_SENSITIVITY_C_Y)
-        or DEFAULT_SENSITIVITY_C_Y
-    )
-    DEFAULT_SENSITIVITY_C_T = float(
-        get_config_float(config, "DEFAULT_SENSITIVITY_C_T", DEFAULT_SENSITIVITY_C_T)
-        or DEFAULT_SENSITIVITY_C_T
-    )
-    DEFAULT_SENSITIVITY_RHO = float(
-        get_config_float(config, "DEFAULT_SENSITIVITY_RHO", DEFAULT_SENSITIVITY_RHO)
-        or DEFAULT_SENSITIVITY_RHO
-    )
-    SENSITIVITY_GRID_STEPS = int(
-        get_config_int(config, "SENSITIVITY_GRID_STEPS", SENSITIVITY_GRID_STEPS)
-        or SENSITIVITY_GRID_STEPS
-    )
-    ALLOWED_TOP_K_VALUES = set(
-        int(value)
-        for value in (get_config_list(config, "ALLOWED_TOP_K_VALUES", list(ALLOWED_TOP_K_VALUES)) or [])
-    )
     BACKGROUND_FEATURE_COLUMNS = list(
         get_config_list(config, "BACKGROUND_FEATURE_COLUMNS", BACKGROUND_FEATURE_COLUMNS) or []
     )
     np.random.seed(SEED)
-
-    latent_tags_default = get_first_available(
-        config,
-        ["ANALYZE_LATENT_TAGS_PATH", "LATENT_TAGS_PATH"],
-        LATENT_TAGS_PATH,
-    )
-    physionet_pkl_default = get_first_available(
-        config,
-        ["ANALYZE_PKL_PATH", "DATASET_PKL_PATH", "PHYSIONET_PKL_PATH"],
-        PHYSIONET_PKL_PATH,
-    )
-    results_dir_default = get_first_available(
-        config,
-        ["CATE_RESULTS_DIR"],
-        CATE_RESULTS_DIR,
-    )
-    output_dir_default = get_first_available(
-        config,
-        ["ANALYZE_OUTPUT_DIR", "OUTPUT_DIR", "CATE_RESULTS_DIR"],
-        None,
-    )
 
     if TOP_K_BENCHMARK_CONFOUNDERS not in ALLOWED_TOP_K_VALUES:
         raise ValueError(
@@ -2592,7 +2543,7 @@ def main() -> None:
         )
 
     results_dir = resolve_script_path(
-        args.results_dir if args.results_dir is not None else results_dir_default
+        args.results_dir if args.results_dir is not None else CATE_RESULTS_DIR
     )
     if not results_dir.exists():
         raise FileNotFoundError(f"Results directory does not exist: {results_dir}")
@@ -2602,8 +2553,6 @@ def main() -> None:
     output_dir = results_dir
     if args.output_dir is not None:
         output_dir = resolve_script_path(args.output_dir)
-    elif output_dir_default is not None:
-        output_dir = resolve_script_path(output_dir_default)
     if output_dir.exists() and not output_dir.is_dir():
         raise NotADirectoryError(f"Output directory is not a directory: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -2611,12 +2560,12 @@ def main() -> None:
     latent_tags_path = resolve_script_path(
         args.latent_tags_path
         if args.latent_tags_path is not None
-        else latent_tags_default
+        else LATENT_TAGS_PATH
     )
     physionet_pkl_path = resolve_script_path(
-        args.physionet_pkl_path
-        if args.physionet_pkl_path is not None
-        else physionet_pkl_default
+        args.dataset_pkl_path
+        if args.dataset_pkl_path is not None
+        else PHYSIONET_PKL_PATH
     )
     print("=== Starting saved CATE analysis ===")
     print(

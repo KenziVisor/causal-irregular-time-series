@@ -22,11 +22,9 @@ import numpy as np
 import pandas as pd
 from dataset_config import (
     get_config_bool,
-    get_config_float,
     get_config_int,
     get_config_list,
     get_config_scalar,
-    get_first_available,
     load_dataset_config,
 )
 from preprocess_mimic_iii_large_contract import canonicalize_stay_id_series
@@ -41,11 +39,19 @@ PHYSIONET_PKL_PATH = "../../data/processed/physionet2012_ts_oc_ids.pkl"
 GRAPH_PKL_PATH = "../../data/causal_graph.pkl"
 
 OUTCOME_COL = "in_hospital_mortality"
-GRAPH_OUTCOME_NODE = "Death"
+GRAPH_OUTCOME_NODE = "OUT_InHospitalMortality"
 
 TREATMENTS = [
-    "Severity", "Shock", "RespFail", "RenalFail", "HepFail", "HemeFail",
-    "Inflam", "NeuroFail", "CardInj", "Metab"
+    "LAT_GLOBAL_SEVERITY",
+    "LAT_SHOCK",
+    "LAT_RESPIRATORY_FAILURE",
+    "LAT_RENAL_DYSFUNCTION",
+    "LAT_HEPATIC_DYSFUNCTION",
+    "LAT_COAG_HEME_DYSFUNCTION",
+    "LAT_INFLAMMATION_SEPSIS_BURDEN",
+    "LAT_NEUROLOGIC_DYSFUNCTION",
+    "LAT_CARDIAC_INJURY_STRAIN",
+    "LAT_METABOLIC_DERANGEMENT",
 ]
 BACKGROUND_FEATURE_COLUMNS = [
     "Age", "Gender", "Weight",
@@ -87,7 +93,13 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--latent-tags-path", default=None)
-    parser.add_argument("--physionet-pkl-path", default=None)
+    parser.add_argument(
+        "--dataset-pkl-path",
+        "--physionet-pkl-path",
+        dest="dataset_pkl_path",
+        default=None,
+        help="Path to the processed dataset pickle. --physionet-pkl-path is a deprecated alias.",
+    )
     parser.add_argument("--graph-pkl-path", default=None)
     parser.add_argument("--output-dir", default=None)
     parser.add_argument(
@@ -314,6 +326,40 @@ def downsample_majority_label(
 # ============================================================
 # Graph logic: backdoor-style confounder discovery
 # ============================================================
+DATAFRAME_TO_GRAPH_NODE_ALIASES = {
+    "Age": ["Age", "BG_Age", "BG_AGE"],
+    "Gender": ["Gender", "BG_Gender", "BG_SEX"],
+    "Sex": ["Gender", "BG_Gender", "BG_SEX"],
+    "Height": ["Height", "BG_HeightWeightBMI"],
+    "Weight": ["Weight", "BG_HeightWeightBMI"],
+    "BMI": ["BMI", "BG_HeightWeightBMI"],
+    "AdmissionType": ["AdmissionType", "BG_ADMISSION_CONTEXT"],
+    "FirstCareUnit": ["FirstCareUnit", "BG_ICU_UNIT"],
+    "Ethnicity": ["Ethnicity", "BG_ETHNICITY_INSURANCE_LANGUAGE"],
+    "Insurance": ["Insurance", "BG_ETHNICITY_INSURANCE_LANGUAGE"],
+    "Language": ["Language", "BG_ETHNICITY_INSURANCE_LANGUAGE"],
+}
+
+GRAPH_NODE_TO_DATAFRAME_ALIASES = {
+    "Age": ["Age"],
+    "BG_Age": ["Age"],
+    "BG_AGE": ["Age"],
+    "Gender": ["Gender"],
+    "BG_Gender": ["Gender"],
+    "BG_SEX": ["Gender"],
+    "Height": ["Height"],
+    "Weight": ["Weight"],
+    "BMI": ["BMI"],
+    "BG_HeightWeightBMI": ["Height", "Weight", "BMI"],
+    "ICUType": ["ICUType_1", "ICUType_2", "ICUType_3", "ICUType_4", "ICUType"],
+    "BG_ICUType": ["ICUType_1", "ICUType_2", "ICUType_3", "ICUType_4", "ICUType"],
+    "BG_ICU_UNIT": ["ICUType_1", "ICUType_2", "ICUType_3", "ICUType_4", "FirstCareUnit"],
+    "AdmissionType": ["AdmissionType"],
+    "BG_ADMISSION_CONTEXT": ["AdmissionType"],
+    "BG_ETHNICITY_INSURANCE_LANGUAGE": ["Ethnicity", "Insurance", "Language"],
+}
+
+
 def dataframe_columns_to_graph_nodes(
     available_columns: List[str],
     G: nx.DiGraph,
@@ -327,9 +373,13 @@ def dataframe_columns_to_graph_nodes(
         if col == OUTCOME_COL:
             continue
         if col.startswith("ICUType_"):
-            if "ICUType" in graph_nodes:
-                mapped.add("ICUType")
+            for candidate in ["ICUType", "BG_ICUType", "BG_ICU_UNIT"]:
+                if candidate in graph_nodes:
+                    mapped.add(candidate)
             continue
+        for candidate in DATAFRAME_TO_GRAPH_NODE_ALIASES.get(col, []):
+            if candidate in graph_nodes:
+                mapped.add(candidate)
         if col in graph_nodes:
             mapped.add(col)
 
@@ -340,8 +390,12 @@ def map_graph_node_to_dataframe_columns(
     node: str,
     available_columns: Set[str],
 ) -> List[str]:
-    if node == "ICUType":
-        return [c for c in ["ICUType_1", "ICUType_2", "ICUType_3", "ICUType_4"] if c in available_columns]
+    if node in GRAPH_NODE_TO_DATAFRAME_ALIASES:
+        return [
+            c
+            for c in GRAPH_NODE_TO_DATAFRAME_ALIASES[node]
+            if c in available_columns
+        ]
     return [node] if node in available_columns else []
 
 
@@ -1042,15 +1096,6 @@ def main():
             USE_EXPANDED_SAFE_CONFOUNDERS,
         )
     )
-    max_dist = int(get_config_int(config, "MAX_DIST", max_dist) or max_dist)
-    MIN_MATCHED_PAIRS = int(
-        get_config_int(config, "MIN_MATCHED_PAIRS", MIN_MATCHED_PAIRS)
-        or MIN_MATCHED_PAIRS
-    )
-    MIN_MATCH_RATE = float(
-        get_config_float(config, "MIN_MATCH_RATE", MIN_MATCH_RATE)
-        or MIN_MATCH_RATE
-    )
     MATCH_WITH_REPLACEMENT = bool(
         get_config_bool(config, "MATCH_WITH_REPLACEMENT", MATCH_WITH_REPLACEMENT)
     )
@@ -1058,41 +1103,24 @@ def main():
         get_config_bool(config, "REQUIRE_BINARY_CONF", REQUIRE_BINARY_CONF)
     )
 
-    latent_tags_default = get_first_available(
-        config,
-        ["MATCHING_LATENT_TAGS_PATH", "LATENT_TAGS_PATH"],
-        LATENT_TAGS_PATH,
-    )
-    physionet_pkl_default = get_first_available(
-        config,
-        ["MATCHING_PKL_PATH", "DATASET_PKL_PATH", "PHYSIONET_PKL_PATH"],
-        PHYSIONET_PKL_PATH,
-    )
-    graph_pkl_default = get_first_available(config, ["GRAPH_PKL_PATH"], GRAPH_PKL_PATH)
-    output_dir_default = get_first_available(
-        config,
-        ["MATCHING_OUTPUT_DIR", "OUTPUT_DIR"],
-        OUTPUT_DIR,
-    )
-
     LATENT_TAGS_PATH = resolve_runtime_path(
         args.latent_tags_path,
-        str(latent_tags_default),
+        LATENT_TAGS_PATH,
         "LATENT_TAGS_PATH",
     )
     PHYSIONET_PKL_PATH = resolve_runtime_path(
-        args.physionet_pkl_path,
-        str(physionet_pkl_default),
-        "PHYSIONET_PKL_PATH",
+        args.dataset_pkl_path,
+        PHYSIONET_PKL_PATH,
+        "DATASET_PKL_PATH",
     )
     GRAPH_PKL_PATH = resolve_runtime_path(
         args.graph_pkl_path,
-        graph_pkl_default,
+        GRAPH_PKL_PATH,
         "GRAPH_PKL_PATH",
     )
     OUTPUT_DIR = resolve_runtime_path(
         args.output_dir,
-        str(output_dir_default),
+        OUTPUT_DIR,
         "OUTPUT_DIR",
         must_exist=False,
     )

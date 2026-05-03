@@ -45,6 +45,7 @@ DATASET_SCRIPTS = {
         "src/split_predicted_latent_tags.py",
         "src/physionet2012_causal_graph.py",
         "src/tagging_latent_variables_physionet.py",
+        "src/decision_trees_plot.py",
         "src/preprocess_physionet_2012.py",
     ],
     "mimic": [
@@ -57,47 +58,17 @@ DATASET_SCRIPTS = {
         "src/split_predicted_latent_tags.py",
         "src/mimiciii_causal_graph.py",
         "src/tagging_latent_variables_mimiciii.py",
+        "src/decision_trees_plot.py",
         "src/preprocess_mimic_iii_large.py",
     ],
 }
 
 EMPTY_ALLOWED_CANONICAL = {
     "ALT_ID_COL",
-    "PHYSIONET_SET_NAMES",
-    "THRESHOLDS_PATH",
 }
 
-SUSPICIOUS_DUPLICATE_GROUPS = [
-    [
-        "LATENT_TAGS_PATH",
-        "CATE_LATENT_TAGS_PATH",
-        "MATCHING_LATENT_TAGS_PATH",
-        "MORTALITY_LATENT_TAGS_PATH",
-        "ANALYZE_LATENT_TAGS_PATH",
-        "PERMUTATIONS_LATENT_TAGS_PATH",
-    ],
-    [
-        "PHYSIONET_PKL_PATH",
-        "DATASET_PKL_PATH",
-        "CATE_PKL_PATH",
-        "MATCHING_PKL_PATH",
-        "MORTALITY_PKL_PATH",
-        "ANALYZE_PKL_PATH",
-        "PERMUTATIONS_PKL_PATH",
-    ],
-    [
-        "OUTPUT_DIR",
-        "CATE_OUTPUT_DIR",
-        "MATCHING_OUTPUT_DIR",
-        "ANALYZE_OUTPUT_DIR",
-    ],
-    ["RESULTS_TXT_PATH", "MORTALITY_RESULTS_TXT_PATH"],
-    ["GRAPH_PKL_PATH", "DEFAULT_GRAPH_PKL_PATH"],
-]
-
-ALLOWED_SAME_VALUE_PAIRS = {
-    frozenset(("GRAPH_PKL_PATH", "DEFAULT_GRAPH_PKL_PATH")),
-}
+SUSPICIOUS_DUPLICATE_GROUPS: list[list[str]] = []
+ALLOWED_SAME_VALUE_PAIRS: set[frozenset[str]] = set()
 
 
 def read_raw_csv(path: Path) -> tuple[list[str], dict[str, list[str]]]:

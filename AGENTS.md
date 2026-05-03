@@ -25,7 +25,8 @@ This is script-first research code, not a package:
 - Most `src/*.py` files use paths like `../../data/...` and `../../physionet2012/...` relative to the process working directory.
 - `src/draft/*.py` usually assume `../../../data/...`.
 - Both causal graph scripts now support explicit `--graph-pkl-path` / `--graph-png-path` CLI outputs; if flags are omitted they still fall back to their historical relative defaults.
-- Dataset-global defaults are loaded from `configs/physionet-global-variables.csv` and `configs/mimic-global-variables.csv`; dataset-aware scripts generally accept `--dataset-config-csv` and resolve values as `CLI > CSV config > old fallback constant`.
+- Dataset-global defaults are loaded from compact CSVs in `configs/`. These CSVs are only for high-level dataset/run choices; paths are supplied by CLI args or script-local defaults.
+- Prefer `--dataset-pkl-path` for processed-pickle CLI wiring. `--physionet-pkl-path` remains a backward-compatible alias in the dataset-neutral scripts.
 - Use the WSL conda environment `econml310` for project commands and validation by default, especially anything that imports `econml`, `sklearn`, `torch`, `pandas`, or `networkx`.
 - Generated result folders under `src/run_*` are archived experiment outputs, not source code.
 
@@ -141,15 +142,15 @@ Why this is the best default:
 
 - Builds a hand-crafted clinical `networkx.DiGraph`.
 - Supports `--graph-pkl-path` and `--graph-png-path`; omitted flags preserve the older relative default output locations.
-- Background nodes: `Age`, `Gender`, `Height`, `Weight`, `ICUType`.
-- Latent nodes: `ChronicRisk`, `AcuteInsult`, `Severity`, `Shock`, `RespFail`, `RenalFail`, `HepFail`, `HemeFail`, `Inflam`, `NeuroFail`, `CardInj`, `Metab`.
-- Observed nodes are vitals, labs, interventions, and the outcome node `Death`.
+- Background nodes use `BG_*` names such as `BG_Age`, `BG_Gender`, `BG_HeightWeightBMI`, and `BG_ICUType`.
+- Latent nodes use `LAT_*` names such as `LAT_CHRONIC_BASELINE_RISK`, `LAT_GLOBAL_SEVERITY`, `LAT_SHOCK`, and organ/system `LAT_*` states.
+- Observed/process nodes use `OBS_*`, `TRT_*`, and `MISS_*` names; the PhysioNet outcome graph node is `OUT_InHospitalMortality`.
 - Main structure:
-  - background -> `ChronicRisk`
-  - `ChronicRisk` and `AcuteInsult` -> `Severity`
-  - `Severity` -> organ-failure latent states
+  - background -> `LAT_CHRONIC_BASELINE_RISK`
+  - `LAT_CHRONIC_BASELINE_RISK` and `LAT_INFLAMMATION_SEPSIS_BURDEN` -> `LAT_GLOBAL_SEVERITY`
+  - `LAT_GLOBAL_SEVERITY` -> downstream organ/system latent states and mortality
   - latent states -> observed measurements
-  - `Severity`, several organ failures, and `Age` -> `Death`
+  - several latent states and selected background factors -> outcome
 - Saves `../data/causal_graph.pkl` and `../PhysioNet 2012 - Causal DAG.png` when CLI output flags are omitted.
 - Guarded by `if __name__ == "__main__":`.
 
@@ -233,7 +234,7 @@ Known issue:
 - Supports `CausalForestDML` and `LinearDML` via `--model-type`.
 - CLI flags:
   - `--latent-tags-path`
-  - `--physionet-pkl-path`
+  - `--dataset-pkl-path` (`--physionet-pkl-path` is a deprecated alias)
   - `--graph-pkl-path`
   - `--output-dir`
   - `--down-sample`
@@ -247,7 +248,7 @@ Known issue:
 - Uses a fixed preferred set of effect modifiers:
   - `Age`, `Gender`, `Weight`
   - `ICUType_1` ... `ICUType_4`
-  - `ChronicRisk`, `AcuteInsult`
+  - dataset-specific baseline/early latent columns from compact config, e.g. `LAT_CHRONIC_BASELINE_RISK` / `LAT_INFLAMMATION_SEPSIS_BURDEN` for PhysioNet
 - Missing confounders / modifiers are median-imputed instead of dropping rows.
 - Current code allows overlap between `W` (confounders) and `X` (effect modifiers).
 - The fit call now passes `cache_values=True`, and saved artifacts include `cache_values_used`, estimator class, exact confounder / effect-modifier order, and a `direct_diagnostics` block for easy post-hoc reuse.
@@ -287,8 +288,8 @@ Known issue:
 
 Both scripts implement essentially the same graph logic:
 
-- map dataframe `ICUType_1..4` back to graph node `ICUType`
-- map dataframe outcome `in_hospital_mortality` to graph outcome node `Death`
+- map dataframe background columns such as `Age`, `Gender`, `Weight`, and `ICUType_1..4` back to dataset-specific graph nodes such as `BG_Age`, `BG_ICUType`, `BG_AGE`, and `BG_ICU_UNIT`
+- keep dataframe outcome `in_hospital_mortality` separate from the dataset-specific graph outcome node configured as `GRAPH_OUTCOME_NODE`
 - keep only available background / latent nodes as adjustment candidates
 - build a candidate backdoor pool as:
   - allowed nodes
@@ -316,9 +317,9 @@ Each run folder contains per-treatment outputs plus `global_summary.csv` and `ma
 ## Biggest Footguns
 
 - Relative paths are not normalized from `__file__`; execution directory matters a lot.
-- The graph uses `Death`, but the dataframe uses `in_hospital_mortality`.
-- Preprocessing converts `ICUType` into one-hot-style variables, but the DAG still uses a single `ICUType` node.
-- `Height` exists in the DAG but is ignored by the current main causal scripts.
+- The dataframe outcome is `in_hospital_mortality`; graph outcome nodes are dataset-specific (`OUT_InHospitalMortality` for PhysioNet, `OUT_MORTALITY` for MIMIC).
+- Preprocessing converts `ICUType` into one-hot-style variables; DAG logic maps those dataframe columns to `BG_ICUType` / `BG_ICU_UNIT` as needed.
+- PhysioNet height/weight/BMI are represented as `BG_HeightWeightBMI`; the main causal scripts still only load `Weight` by default.
 - The simple tagger and the Optuna optimizer belong to the older summary-statistics pipeline.
 - `matching_causal_effect.py` still defaults to the older `latent_tags.csv` path.
 - Several scripts auto-run when imported: the large MIMIC preprocessor, the older simple tagger, and `draft/treatment_split.py`.

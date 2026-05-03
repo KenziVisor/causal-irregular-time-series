@@ -14,7 +14,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from src.dataset_config import (
-    get_first_available,
     get_config_int,
     get_config_scalar,
     load_dataset_config,
@@ -320,13 +319,7 @@ def build_run_context(args: argparse.Namespace) -> RunContext:
 
     dataset_pkl_value = args.dataset_pkl_path
     if dataset_pkl_value is None and args.validate_config_only:
-        dataset_pkl_value = str(
-            get_first_available(
-                config,
-                ["DATASET_PKL_PATH", "PHYSIONET_PKL_PATH"],
-                "dataset.pkl",
-            )
-        )
+        dataset_pkl_value = "dataset.pkl"
     if dataset_pkl_value is None:
         raise ValueError("Provide --dataset-pkl-path for a full pipeline run.")
 
@@ -619,7 +612,7 @@ def build_mortality_command(context: RunContext) -> list[str]:
         str(context.dataset_config_csv),
         "--latent-tags-path",
         context.stages["majority_vote"].output_paths["majority_vote_csv"],
-        "--physionet-pkl-path",
+        "--dataset-pkl-path",
         str(context.dataset_pkl_path),
         "--results-txt-path",
         stage.output_paths["results_txt"],
@@ -637,7 +630,7 @@ def build_matching_command(context: RunContext) -> list[str]:
         str(context.dataset_config_csv),
         "--latent-tags-path",
         context.stages["majority_vote"].output_paths["majority_vote_csv"],
-        "--physionet-pkl-path",
+        "--dataset-pkl-path",
         str(context.dataset_pkl_path),
         "--graph-pkl-path",
         context.stages["graph"].output_paths["graph_pkl_path"],
@@ -657,7 +650,7 @@ def build_cate_command(context: RunContext) -> list[str]:
         str(context.dataset_config_csv),
         "--latent-tags-path",
         context.stages["majority_vote"].output_paths["majority_vote_csv"],
-        "--physionet-pkl-path",
+        "--dataset-pkl-path",
         str(context.dataset_pkl_path),
         "--graph-pkl-path",
         context.stages["graph"].output_paths["graph_pkl_path"],
@@ -679,7 +672,7 @@ def build_analyze_command(context: RunContext) -> list[str]:
         str(context.dataset_config_csv),
         "--latent-tags-path",
         context.stages["majority_vote"].output_paths["majority_vote_csv"],
-        "--physionet-pkl-path",
+        "--dataset-pkl-path",
         str(context.dataset_pkl_path),
         "--results-dir",
         context.stages["cate_estimation"].output_paths["output_dir"],
@@ -703,7 +696,7 @@ def build_permutations_command(context: RunContext) -> list[str]:
         stage.output_paths["output_dir"],
         "--latent-tags-path",
         context.stages["majority_vote"].output_paths["majority_vote_csv"],
-        "--physionet-pkl-path",
+        "--dataset-pkl-path",
         str(context.dataset_pkl_path),
         "--graph-pkl-path",
         context.stages["graph"].output_paths["graph_pkl_path"],

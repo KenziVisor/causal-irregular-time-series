@@ -1,106 +1,127 @@
 Global Variables CSV Parameters
 ===============================
 
-These notes describe the dataset config CSVs:
+These notes describe the compact dataset config CSVs:
 
 - configs/physionet-global-variables.csv
 - configs/mimic-global-variables.csv
 
+`src/dataset_config.py` is the executable source of truth for the schema. This
+document mirrors the current compact contract and explains how scripts use it.
+
 CSV format
 ----------
 
-- One column is one global/config variable.
-- A scalar value is read from the first non-empty cell in that column.
-- A list is represented by vertical values in the same column.
-- A dict or nested config is represented as a JSON string in the first non-empty cell.
+- The header must exactly match `COMPACT_CONFIG_FIELDS` in
+  `src/dataset_config.py`, including order.
+- Each config file currently has one dataset row.
+- Scalars are read directly from that row.
+- Lists are JSON arrays in one cell, for example `["Age","Gender"]`.
+- Booleans use values such as `True` or `False`.
 - CLI arguments override CSV values when a script supports both.
 
-Runtime and path parameters
----------------------------
+Current compact field contract
+------------------------------
 
-These values choose input files, output folders, and artifact locations. Common examples:
+- PREFERRED_ENV_NAME: preferred conda/runtime environment name for provenance.
+- SEED: integer seed used by splits, models, and permutations.
+- DATASET_NAME: human-readable dataset name.
+- ID_COL: canonical row/patient identifier column, usually `ts_id`.
+- ALT_ID_COL: optional alternate id accepted by some dataset-neutral scripts.
+- OUTCOME_COL: dataframe outcome column, for example `in_hospital_mortality`.
+- GRAPH_OUTCOME_NODE: dataset-specific outcome node in the causal DAG.
+- TREATMENTS: JSON list of latent treatment graph-node names to evaluate.
+- LATENT_ORDER: JSON list defining expected latent-state order.
+- BACKGROUND_FEATURE_COLUMNS: JSON list of baseline covariates loaded from `ts`.
+- EFFECT_MODIFIER_COLUMNS: JSON list of CATE effect modifier columns.
+- MODEL_TYPE: estimator family such as `CausalForest` or `LinearDML`.
+- TRIALS: integer number of permutation trials used by `main.py` and
+  `src/permutations_test.py`.
+- DOWN_SAMPLE: whether supported estimators down-sample the majority outcome
+  class.
+- USE_EXPANDED_SAFE_CONFOUNDERS: whether DAG logic uses the expanded safe
+  confounder filter.
+- SAVE_CONTOUR_PLOT: whether saved CATE analysis writes contour plots when
+  supported by the analysis path.
+- MATCH_WITH_REPLACEMENT: whether matching may reuse controls.
+- REQUIRE_BINARY_CONF: whether matching rejects non-binary confounders instead
+  of median-binarizing them.
 
-- LATENT_TAGS_PATH: default latent-tag CSV path.
-- PHYSIONET_PKL_PATH / DATASET_PKL_PATH: processed `[ts, oc, ts_ids]` pickle path.
-- GRAPH_PKL_PATH: saved causal graph pickle path.
-- OUTPUT_DIR: default output directory for a script or run.
-- CATE_RESULTS_DIR: existing CATE artifact root used by analysis scripts.
-- EXPERIMENT_DIR: run-specific experiment output root.
-- RESULTS_TXT_PATH: text report output path.
+Path and artifact parameters
+----------------------------
+
+The current compact CSVs intentionally do not store input/output artifact paths.
+Paths are supplied by CLI flags or by script-local legacy defaults. This keeps
+the dataset config focused on dataset/run semantics and avoids many duplicate
+per-script path columns.
+
+Common path flags are documented in `SCRIPTS.md`. Important examples:
+
+- `--latent-tags-path`: latent-tag CSV input.
+- `--dataset-pkl-path`: processed `[ts, oc, ts_ids]` pickle input.
+- `--graph-pkl-path`: causal graph pickle input or output, depending on script.
+- `--output-dir`: run output directory.
+- `--results-dir`: saved CATE artifact root for analysis.
+- `--experiment-dir`: permutation experiment output root.
+
+`--physionet-pkl-path` remains a backward-compatible alias for
+`--dataset-pkl-path` in dataset-neutral scripts that still expose the old flag.
 
 Duplicate-minimization rule
 ---------------------------
 
-Use canonical keys when several scripts share the same value. For example, keep
-one LATENT_TAGS_PATH when CATE, mortality, analysis, and permutations all use
-the same latent-tag CSV.
+Do not add script-specific duplicate columns unless the code explicitly needs a
+durable dataset-level default. Prefer CLI flags for per-run paths and keep the
+CSV compact.
 
-Use script-specific keys only when a script genuinely needs a different default.
-For example, PhysioNet keeps MATCHING_LATENT_TAGS_PATH because matching still
-defaults to the older latent_tags.csv path while the other downstream scripts
-use the predicted absolute-tags CSV.
+If a new CSV field is needed, update all of these together:
 
-Scripts resolve aliases internally, so the CSV does not need duplicate columns
-such as CATE_LATENT_TAGS_PATH, MORTALITY_LATENT_TAGS_PATH, or CATE_PKL_PATH when
-those values are identical to the canonical LATENT_TAGS_PATH or
-PHYSIONET_PKL_PATH.
-
-CLI values always override CSV values. CSV values override the script's legacy
-fallback constants.
-
-Intentional same-value exceptions should stay rare and documented. The graph
-keys are the main accepted case: GRAPH_PKL_PATH is the downstream graph input,
-while DEFAULT_GRAPH_PKL_PATH / DEFAULT_GRAPH_PNG_PATH are the graph-builder
-artifact defaults and may match in datasets whose historical paths already
-align.
+- `COMPACT_CONFIG_FIELDS` and typed key sets in `src/dataset_config.py`
+- script config contracts in `src/dataset_config.py`
+- both dataset CSV headers and values
+- this document
+- `scripts/validate_global_variables_config.py` expectations, if relevant
 
 Dataset and causal parameters
 -----------------------------
 
-These values configure dataset names, column names, and the node/feature names used by the scripts:
+The dataframe outcome and graph outcome are deliberately separate:
 
-- DATASET_MODEL: dataset selector such as `physionet` or `mimic`.
-- TREATMENTS: latent treatment columns to evaluate.
-- LATENT_ORDER: expected latent-state column order.
-- BACKGROUND_FEATURE_COLUMNS: baseline covariates loaded from the processed time series.
-- EFFECT_MODIFIER_COLUMNS: features passed as CATE effect modifiers.
-- OUTCOME_COL: outcome column in the dataframe.
-- GRAPH_OUTCOME_NODE: corresponding outcome node name in the DAG.
+- `OUTCOME_COL` names the outcome column after loading data.
+- `GRAPH_OUTCOME_NODE` names the corresponding outcome node inside the DAG.
+
+Treatment and latent lists use graph-node names in the config. Scripts map those
+to dataframe latent-tag columns where needed.
 
 Estimation parameters
 ---------------------
 
-These values control model choice and estimation defaults:
-
-- MODEL_TYPE: estimator family, for example `CausalForest` or `LinearDML`.
-- SEED: random seed for reproducible splits, models, and permutations.
-- DOWN_SAMPLE: whether to down-sample outcomes where supported.
-- USE_EXPANDED_SAFE_CONFOUNDERS: whether to use the expanded DAG-safe confounder filter.
-- DEFAULT_SENSITIVITY_ALPHA: default alpha for sensitivity intervals.
-
-Matching and permutation parameters
------------------------------------
-
-These values tune matched-pair summaries and permutation checks:
-
-- MAX_DIST: maximum Hamming distance allowed for a matched pair.
-- MIN_MATCHED_PAIRS: minimum matched-pair count required for reporting.
-- MIN_MATCH_RATE: minimum treated-unit match rate.
-- MATCH_WITH_REPLACEMENT: whether controls can be reused.
-- TRIALS: number of permutation trials.
+`MODEL_TYPE`, `DOWN_SAMPLE`, `USE_EXPANDED_SAFE_CONFOUNDERS`, and `SEED` provide
+run defaults. CLI values still win when exposed by the script.
 
 Tagging and preprocessing parameters
 ------------------------------------
 
-These values configure preprocessing paths and latent-tagging thresholds where the scripts support them:
+`LATENT_ORDER` is shared by taggers and plotting. Tagging thresholds and
+preprocessing paths are not part of the current compact CSV contract; pass them
+through the relevant script flags, such as `--thresholds-path`,
+`--raw-data-path`, and `--output-path`.
 
-- DEFAULT_THRESHOLDS: JSON dict of rule thresholds.
-- THRESHOLDS_PATH: path to optimized threshold values for older taggers.
-- OPTIMIZED: whether to load optimized thresholds where supported.
-- PREPROCESS_RAW_DATA_PATH: raw dataset input root.
-- PREPROCESS_OUTPUT_PATH: processed pickle output path.
+Validation
+----------
+
+Use these checks after changing either config CSV or this document:
+
+- `python3 scripts/validate_global_variables_config.py`
+- `./scripts/validate_global_variables_config.sh`
+
+The shell check also runs active scripts with `--validate-config-only` in the
+configured conda environment.
 
 Warning
 -------
 
-Do not edit scientific DAG edges or latent decision-rule logic through this file unless the code explicitly supports it. These CSVs configure names, paths, thresholds, and runtime defaults; they are not a replacement for the causal model code.
+Do not edit scientific DAG edges or latent decision-rule logic through these
+CSV files unless the code explicitly supports it. The compact configs set
+dataset identifiers, column/node names, feature lists, and run defaults; they
+are not a replacement for the causal model code.

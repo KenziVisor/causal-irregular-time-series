@@ -9,21 +9,34 @@ from typing import Any
 
 
 DATASET_CHOICES = {"physionet", "mimic"}
+MODEL_TYPE_CHOICES = {"CausalForest", "LinearDML"}
+
+COMPACT_CONFIG_FIELDS = [
+    "PREFERRED_ENV_NAME",
+    "SEED",
+    "DATASET_NAME",
+    "ID_COL",
+    "ALT_ID_COL",
+    "OUTCOME_COL",
+    "GRAPH_OUTCOME_NODE",
+    "TREATMENTS",
+    "LATENT_ORDER",
+    "BACKGROUND_FEATURE_COLUMNS",
+    "EFFECT_MODIFIER_COLUMNS",
+    "MODEL_TYPE",
+    "TRIALS",
+    "DOWN_SAMPLE",
+    "USE_EXPANDED_SAFE_CONFOUNDERS",
+    "SAVE_CONTOUR_PLOT",
+    "MATCH_WITH_REPLACEMENT",
+    "REQUIRE_BINARY_CONF",
+]
 
 KNOWN_LIST_KEYS = {
     "TREATMENTS",
     "LATENT_ORDER",
     "BACKGROUND_FEATURE_COLUMNS",
     "EFFECT_MODIFIER_COLUMNS",
-    "PHYSIONET_SET_NAMES",
-    "CHRONIC_ICD_KEYWORDS",
-    "ACUTE_ICD_KEYWORDS",
-    "PICKLE_GCS_COMPONENTS",
-    "PICKLE_EXPECTED_SUMMARY_COLUMNS",
-    "CANONICAL_TS_COLUMNS",
-    "CANONICAL_OC_COLUMNS",
-    "REQUIRED_OC_COLUMNS",
-    "ALLOWED_TOP_K_VALUES",
 }
 
 KNOWN_BOOL_KEYS = {
@@ -32,93 +45,21 @@ KNOWN_BOOL_KEYS = {
     "SAVE_CONTOUR_PLOT",
     "MATCH_WITH_REPLACEMENT",
     "REQUIRE_BINARY_CONF",
-    "OPTIMIZED",
 }
 
 KNOWN_INT_KEYS = {
     "SEED",
     "TRIALS",
-    "SENSITIVITY_GRID_STEPS",
-    "TOP_K_BENCHMARK_CONFOUNDERS",
-    "ARTIFACT_SCHEMA_VERSION",
-    "MAX_DIST",
-    "MIN_MATCHED_PAIRS",
-    "TOTAL_STAGES",
-    "PROGRESS_EVERY",
 }
 
-KNOWN_FLOAT_KEYS = {
-    "DEFAULT_SENSITIVITY_ALPHA",
-    "DEFAULT_SENSITIVITY_C_Y",
-    "DEFAULT_SENSITIVITY_C_T",
-    "DEFAULT_SENSITIVITY_RHO",
-    "EPSILON",
-    "MIN_MATCH_RATE",
-}
-
-REQUIRED_CANONICAL_KEYS = [
-    "DATASET_MODEL",
-    "DATASET_NAME",
-    "ID_COL",
-    "ALT_ID_COL",
-    "OUTCOME_COL",
-    "GRAPH_OUTCOME_NODE",
-    "LATENT_TAGS_PATH",
-    "PHYSIONET_PKL_PATH",
-    "GRAPH_PKL_PATH",
-    "OUTPUT_DIR",
-    "RESULTS_TXT_PATH",
-    "CATE_RESULTS_DIR",
-    "EXPERIMENT_DIR",
-    "TREATMENTS",
-    "LATENT_ORDER",
-    "BACKGROUND_FEATURE_COLUMNS",
-    "EFFECT_MODIFIER_COLUMNS",
-    "MODEL_TYPE",
-    "SEED",
-    "TRIALS",
-    "DOWN_SAMPLE",
-    "USE_EXPANDED_SAFE_CONFOUNDERS",
-    "DEFAULT_SENSITIVITY_ALPHA",
-    "MAX_DIST",
-    "MIN_MATCHED_PAIRS",
-    "MIN_MATCH_RATE",
-    "MATCH_WITH_REPLACEMENT",
-    "REQUIRE_BINARY_CONF",
-    "DEFAULT_GRAPH_PKL_PATH",
-    "DEFAULT_GRAPH_PNG_PATH",
-    "PREPROCESS_RAW_DATA_PATH",
-    "PREPROCESS_OUTPUT_PATH",
-    "PREPROCESS_OUTPUT_DIR",
-    "PHYSIONET_SET_NAMES",
-    "TAGGING_PKL_PATH",
-    "TAGGING_OUTPUT_CSV_PATH",
-    "OPTIMIZED",
-    "THRESHOLDS_PATH",
-    "DEFAULT_THRESHOLDS",
-]
-
-MIMIC_ONLY_KEYS = [
-    "CHRONIC_ICD_KEYWORDS",
-    "ACUTE_ICD_KEYWORDS",
-    "PICKLE_TS_SUMMARY_SPECS",
-    "PICKLE_GCS_COMPONENTS",
-    "PICKLE_URINE_VARIABLE",
-    "PICKLE_WEIGHT_VARIABLE",
-    "PICKLE_TS_BINARY_HELPERS",
-    "PICKLE_OC_OPTIONAL_FIELDS",
-    "PICKLE_EXPECTED_SUMMARY_COLUMNS",
-    "PROGRESS_EVERY",
-]
+KNOWN_FLOAT_KEYS: set[str] = set()
+REQUIRED_CANONICAL_KEYS = list(COMPACT_CONFIG_FIELDS)
+MIMIC_ONLY_KEYS: list[str] = []
 
 SCRIPT_CONFIG_CONTRACTS: dict[str, dict[str, object]] = {
     "main.py": {
         "required_keys": ["MODEL_TYPE", "TRIALS"],
-        "alias_groups": {
-            "latent_tags_path": ["LATENT_TAGS_PATH"],
-            "dataset_pkl_path": ["DATASET_PKL_PATH", "PHYSIONET_PKL_PATH"],
-            "output_dir": ["OUTPUT_DIR"],
-        },
+        "alias_groups": {},
     },
     "src/cate_estimation.py": {
         "required_keys": [
@@ -130,15 +71,9 @@ SCRIPT_CONFIG_CONTRACTS: dict[str, dict[str, object]] = {
             "SEED",
             "DOWN_SAMPLE",
             "USE_EXPANDED_SAFE_CONFOUNDERS",
-            "DEFAULT_SENSITIVITY_ALPHA",
             "MODEL_TYPE",
         ],
-        "alias_groups": {
-            "latent_tags_path": ["CATE_LATENT_TAGS_PATH", "LATENT_TAGS_PATH"],
-            "pkl_path": ["CATE_PKL_PATH", "DATASET_PKL_PATH", "PHYSIONET_PKL_PATH"],
-            "graph_pkl_path": ["GRAPH_PKL_PATH"],
-            "output_dir": ["CATE_OUTPUT_DIR", "OUTPUT_DIR"],
-        },
+        "alias_groups": {},
     },
     "src/matching_causal_effect.py": {
         "required_keys": [
@@ -149,116 +84,59 @@ SCRIPT_CONFIG_CONTRACTS: dict[str, dict[str, object]] = {
             "SEED",
             "DOWN_SAMPLE",
             "USE_EXPANDED_SAFE_CONFOUNDERS",
-            "MAX_DIST",
-            "MIN_MATCHED_PAIRS",
-            "MIN_MATCH_RATE",
             "MATCH_WITH_REPLACEMENT",
             "REQUIRE_BINARY_CONF",
         ],
-        "alias_groups": {
-            "latent_tags_path": ["MATCHING_LATENT_TAGS_PATH", "LATENT_TAGS_PATH"],
-            "pkl_path": ["MATCHING_PKL_PATH", "DATASET_PKL_PATH", "PHYSIONET_PKL_PATH"],
-            "graph_pkl_path": ["GRAPH_PKL_PATH"],
-            "output_dir": ["MATCHING_OUTPUT_DIR", "OUTPUT_DIR"],
-        },
+        "alias_groups": {},
     },
     "src/mortality_prediction_using_latents.py": {
         "required_keys": ["OUTCOME_COL", "SEED"],
-        "alias_groups": {
-            "latent_tags_path": ["MORTALITY_LATENT_TAGS_PATH", "LATENT_TAGS_PATH"],
-            "pkl_path": ["MORTALITY_PKL_PATH", "DATASET_PKL_PATH", "PHYSIONET_PKL_PATH"],
-            "results_txt_path": ["MORTALITY_RESULTS_TXT_PATH", "RESULTS_TXT_PATH"],
-        },
+        "alias_groups": {},
     },
     "src/analyze_cate_results.py": {
         "required_keys": [
+            "PREFERRED_ENV_NAME",
             "OUTCOME_COL",
             "BACKGROUND_FEATURE_COLUMNS",
             "SEED",
-            "DEFAULT_SENSITIVITY_ALPHA",
+            "SAVE_CONTOUR_PLOT",
         ],
-        "alias_groups": {
-            "latent_tags_path": ["ANALYZE_LATENT_TAGS_PATH", "LATENT_TAGS_PATH"],
-            "pkl_path": ["ANALYZE_PKL_PATH", "DATASET_PKL_PATH", "PHYSIONET_PKL_PATH"],
-            "results_dir": ["CATE_RESULTS_DIR"],
-            "output_dir": ["ANALYZE_OUTPUT_DIR", "OUTPUT_DIR", "CATE_RESULTS_DIR"],
-        },
+        "alias_groups": {},
     },
     "src/permutations_test.py": {
         "required_keys": ["OUTCOME_COL", "TRIALS", "MODEL_TYPE", "SEED"],
-        "alias_groups": {
-            "experiment_dir": ["EXPERIMENT_DIR"],
-            "latent_tags_path": ["PERMUTATIONS_LATENT_TAGS_PATH", "LATENT_TAGS_PATH"],
-            "pkl_path": ["PERMUTATIONS_PKL_PATH", "DATASET_PKL_PATH", "PHYSIONET_PKL_PATH"],
-            "graph_pkl_path": ["GRAPH_PKL_PATH"],
-        },
+        "alias_groups": {},
     },
     "src/split_predicted_latent_tags.py": {
-        "required_keys": ["DATASET_MODEL"],
-        "alias_groups": {
-            "input_csv": ["SPLIT_INPUT_CSV", "INPUT_CSV"],
-        },
+        "required_keys": [],
+        "alias_groups": {},
     },
     "src/physionet2012_causal_graph.py": {
-        "required_keys": ["GRAPH_OUTCOME_NODE"],
-        "alias_groups": {
-            "graph_pkl_path": ["DEFAULT_GRAPH_PKL_PATH", "GRAPH_PKL_PATH"],
-            "graph_png_path": ["DEFAULT_GRAPH_PNG_PATH"],
-        },
+        "required_keys": [],
+        "alias_groups": {},
     },
     "src/mimiciii_causal_graph.py": {
-        "required_keys": ["GRAPH_OUTCOME_NODE"],
-        "alias_groups": {
-            "graph_pkl_path": ["DEFAULT_GRAPH_PKL_PATH", "GRAPH_PKL_PATH"],
-            "graph_png_path": ["DEFAULT_GRAPH_PNG_PATH"],
-        },
+        "required_keys": [],
+        "alias_groups": {},
     },
     "src/tagging_latent_variables_physionet.py": {
-        "required_keys": [
-            "LATENT_ORDER",
-            "TAGGING_PKL_PATH",
-            "TAGGING_OUTPUT_CSV_PATH",
-            "OPTIMIZED",
-            "DEFAULT_THRESHOLDS",
-        ],
-        "alias_groups": {
-            "thresholds_path": ["THRESHOLDS_PATH"],
-        },
+        "required_keys": ["LATENT_ORDER"],
+        "alias_groups": {},
     },
     "src/tagging_latent_variables_mimiciii.py": {
-        "required_keys": [
-            "LATENT_ORDER",
-            "TAGGING_PKL_PATH",
-            "TAGGING_OUTPUT_CSV_PATH",
-            "DEFAULT_THRESHOLDS",
-            "CHRONIC_ICD_KEYWORDS",
-            "ACUTE_ICD_KEYWORDS",
-            "PICKLE_TS_SUMMARY_SPECS",
-            "PICKLE_GCS_COMPONENTS",
-            "PICKLE_URINE_VARIABLE",
-            "PICKLE_WEIGHT_VARIABLE",
-            "PICKLE_TS_BINARY_HELPERS",
-            "PICKLE_OC_OPTIONAL_FIELDS",
-            "PICKLE_EXPECTED_SUMMARY_COLUMNS",
-            "PROGRESS_EVERY",
-        ],
+        "required_keys": ["LATENT_ORDER"],
+        "alias_groups": {},
+    },
+    "src/decision_trees_plot.py": {
+        "required_keys": ["LATENT_ORDER"],
         "alias_groups": {},
     },
     "src/preprocess_physionet_2012.py": {
-        "required_keys": [
-            "PREPROCESS_RAW_DATA_PATH",
-            "PREPROCESS_OUTPUT_PATH",
-            "PREPROCESS_OUTPUT_DIR",
-            "PHYSIONET_SET_NAMES",
-        ],
+        "required_keys": [],
         "alias_groups": {},
     },
     "src/preprocess_mimic_iii_large.py": {
-        "required_keys": [
-            "PREPROCESS_RAW_DATA_PATH",
-            "PREPROCESS_OUTPUT_PATH",
-            "TOTAL_STAGES",
-        ],
+        "required_keys": [],
         "alias_groups": {},
     },
 }
@@ -332,6 +210,64 @@ def _parse_value(raw_value: str, *, dataset: str, path: Path, key: str) -> Any:
     return value
 
 
+def _validate_header(dataset: str, path: Path, columns: list[str]) -> None:
+    if columns == COMPACT_CONFIG_FIELDS:
+        return
+
+    expected = set(COMPACT_CONFIG_FIELDS)
+    actual = set(columns)
+    missing = [key for key in COMPACT_CONFIG_FIELDS if key not in actual]
+    extra = [key for key in columns if key not in expected]
+    order_mismatch = not missing and not extra and columns != COMPACT_CONFIG_FIELDS
+
+    details = []
+    if missing:
+        details.append(f"missing columns={missing}")
+    if extra:
+        details.append(f"unexpected columns={extra}")
+    if order_mismatch:
+        details.append("columns are present but not in the compact contract order")
+
+    raise ValueError(
+        "Dataset config CSV must use the compact column contract exactly "
+        f"({_context_message(dataset, path, '<header>')}): "
+        + "; ".join(details)
+    )
+
+
+def _validate_compact_config(config: dict[str, object]) -> None:
+    dataset = _config_dataset(config)
+    path = _config_path(config)
+
+    empty_allowed = {"ALT_ID_COL"}
+    missing_values = [
+        key
+        for key in COMPACT_CONFIG_FIELDS
+        if key not in empty_allowed and not _has_config_value(config.get(key))
+    ]
+    if missing_values:
+        raise ValueError(
+            "Dataset config CSV has empty required compact fields "
+            f"({_context_message(dataset, path, '<required>')}): {missing_values}"
+        )
+
+    model_type = get_config_scalar(config, "MODEL_TYPE", None)
+    if model_type not in MODEL_TYPE_CHOICES:
+        raise ValueError(
+            "Invalid MODEL_TYPE in dataset config "
+            f"({_context_message(dataset, path, 'MODEL_TYPE')}): {model_type!r}. "
+            f"Allowed values: {sorted(MODEL_TYPE_CHOICES)}"
+        )
+
+    for key in sorted(KNOWN_BOOL_KEYS):
+        if _has_config_value(config.get(key)):
+            get_config_bool(config, key)
+
+    for key in sorted(KNOWN_INT_KEYS):
+        if _has_config_value(config.get(key)):
+            get_config_int(config, key)
+
+
 def load_dataset_config(
     dataset: str,
     config_csv_path: str | Path | None = None,
@@ -364,6 +300,7 @@ def load_dataset_config(
             )
 
         columns = [field.strip() for field in reader.fieldnames if field and field.strip()]
+        _validate_header(dataset, path, columns)
         values_by_key: dict[str, list[str]] = {key: [] for key in columns}
 
         for row in reader:
@@ -388,10 +325,14 @@ def load_dataset_config(
             continue
 
         if key in KNOWN_LIST_KEYS:
-            config[key] = [
-                _parse_value(raw, dataset=dataset, path=path, key=key)
-                for raw in raw_values
-            ]
+            parsed_items: list[Any] = []
+            for raw in raw_values:
+                parsed = _parse_value(raw, dataset=dataset, path=path, key=key)
+                if isinstance(parsed, list):
+                    parsed_items.extend(parsed)
+                else:
+                    parsed_items.append(parsed)
+            config[key] = parsed_items
             continue
 
         if len(raw_values) == 1:
@@ -403,6 +344,7 @@ def load_dataset_config(
             for raw in raw_values
         ]
 
+    _validate_compact_config(config)
     return config
 
 
@@ -657,10 +599,15 @@ def print_resolved_config_summary(
     resolved: dict[str, dict[str, object]],
 ) -> None:
     normalized_script = normalize_script_name(script_name)
+    used_fields = list(SCRIPT_CONFIG_CONTRACTS.get(normalized_script, {}).get("required_keys", []))
     print("VALIDATE-CONFIG-ONLY PASS")
     print(f"  dataset: {_config_dataset(config)}")
     print(f"  script: {normalized_script}")
     print(f"  config_csv: {_config_path(config)}")
+    print(
+        "  compact_fields_used: "
+        + (", ".join(str(field) for field in used_fields) if used_fields else "(none)")
+    )
     for name in sorted(resolved):
         item = resolved[name]
         value = _format_summary_value(item["value"])

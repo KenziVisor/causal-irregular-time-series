@@ -20,10 +20,8 @@ if "--validate-config-only" in sys.argv:
 import numpy as np
 import pandas as pd
 from dataset_config import (
-    get_config_float,
     get_config_int,
     get_config_scalar,
-    get_first_available,
     load_dataset_config,
 )
 
@@ -123,11 +121,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--dataset-pkl-path",
         "--physionet-pkl-path",
+        dest="dataset_pkl_path",
         default=None,
         help=(
-            "Path to the processed PhysioNet pickle. Default: use script-level "
-            f"PHYSIONET_PKL_PATH ({PHYSIONET_PKL_PATH}) if set."
+            "Path to the processed dataset pickle. Default: use script-level "
+            f"PHYSIONET_PKL_PATH ({PHYSIONET_PKL_PATH}) if set. "
+            "--physionet-pkl-path is a deprecated alias."
         ),
     )
     parser.add_argument(
@@ -330,7 +331,7 @@ def run_cate_estimation_once(
         dataset_config_csv,
         "--latent-tags-path",
         latent_tags_path,
-        "--physionet-pkl-path",
+        "--dataset-pkl-path",
         physionet_pkl_path,
         "--model",
         DATASET_MODEL,
@@ -729,7 +730,6 @@ def main() -> None:
     dataset_config_csv = str(config["__config_csv_path__"])
 
     OUTCOME_COL = str(get_config_scalar(config, "OUTCOME_COL", OUTCOME_COL))
-    EPSILON = float(get_config_float(config, "EPSILON", EPSILON) or EPSILON)
 
     trials = resolve_runtime_int(
         args.trials,
@@ -737,41 +737,25 @@ def main() -> None:
         "TRIALS",
         minimum=1,
     )
-    experiment_dir_default = get_first_available(
-        config,
-        ["EXPERIMENT_DIR"],
-        EXPERIMENT_DIR,
-    )
     experiment_dir = resolve_runtime_path(
         args.experiment_dir,
-        str(experiment_dir_default),
+        EXPERIMENT_DIR,
         "EXPERIMENT_DIR",
         must_exist=False,
     )
-    latent_tags_default = get_first_available(
-        config,
-        ["PERMUTATIONS_LATENT_TAGS_PATH", "LATENT_TAGS_PATH"],
-        LATENT_TAGS_PATH,
-    )
-    physionet_pkl_default = get_first_available(
-        config,
-        ["PERMUTATIONS_PKL_PATH", "DATASET_PKL_PATH", "PHYSIONET_PKL_PATH"],
-        PHYSIONET_PKL_PATH,
-    )
-    graph_pkl_default = get_first_available(config, ["GRAPH_PKL_PATH"], GRAPH_PKL_PATH)
     latent_tags_path = resolve_runtime_path(
         args.latent_tags_path,
-        str(latent_tags_default),
+        LATENT_TAGS_PATH,
         "LATENT_TAGS_PATH",
     )
     physionet_pkl_path = resolve_runtime_path(
-        args.physionet_pkl_path,
-        str(physionet_pkl_default),
-        "PHYSIONET_PKL_PATH",
+        args.dataset_pkl_path,
+        PHYSIONET_PKL_PATH,
+        "DATASET_PKL_PATH",
     )
     graph_pkl_path = resolve_runtime_path(
         args.graph_pkl_path,
-        graph_pkl_default,
+        GRAPH_PKL_PATH,
         "GRAPH_PKL_PATH",
     )
     model_type = resolve_runtime_choice(

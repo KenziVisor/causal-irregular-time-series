@@ -18,8 +18,6 @@ import os
 import pandas as pd
 import pickle
 
-from dataset_config import get_config_list, get_config_scalar, get_first_available, load_dataset_config
-
 
 RAW_DATA_PATH = '../../physionet2012'
 filepath = '../../data/processed/physionet2012_ts_oc_ids.pkl'
@@ -125,26 +123,13 @@ def preprocessing(path: str, set_names=None):
 
 def main():
     args = parse_args()
-    config = load_dataset_config("physionet", args.dataset_config_csv)
 
-    raw_data_path = args.raw_data_path or str(
-        get_first_available(
-            config,
-            ["PREPROCESS_RAW_DATA_PATH", "RAW_DATA_PATH"],
-            RAW_DATA_PATH,
-        )
-    )
-    processed_dir = args.processed_dir or str(
-        get_config_scalar(config, "PREPROCESS_OUTPUT_DIR", makedir_process)
-    )
-    output_path = args.output_path or str(
-        get_config_scalar(config, "PREPROCESS_OUTPUT_PATH", filepath)
-    )
+    raw_data_path = args.raw_data_path or RAW_DATA_PATH
+    processed_dir = args.processed_dir or makedir_process
+    output_path = args.output_path or filepath
     if args.processed_dir is not None and args.output_path is None:
         output_path = os.path.join(processed_dir, os.path.basename(output_path))
-    set_names = list(
-        get_config_list(config, "PHYSIONET_SET_NAMES", PHYSIONET_SET_NAMES) or []
-    )
+    set_names = list(PHYSIONET_SET_NAMES)
 
     ts, oc, ts_ids = preprocessing(raw_data_path, set_names=set_names)
     print(f"[4/4] Saving processed artifact to: {os.path.abspath(output_path)}")

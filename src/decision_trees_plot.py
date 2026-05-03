@@ -31,7 +31,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch
 
-from dataset_config import get_config_list, get_config_scalar, load_dataset_config
+from dataset_config import get_config_list, load_dataset_config
 
 
 # ---------------------------------------------------------------------------
@@ -985,16 +985,6 @@ def main() -> None:
     args = parse_args()
     validate_args(args)
     config = load_dataset_config(args.dataset, args.dataset_config_csv)
-    configured_thresholds = get_config_scalar(config, "DEFAULT_THRESHOLDS", None)
-    if isinstance(configured_thresholds, dict):
-        DEFAULT_THRESHOLDS[args.dataset] = dict(configured_thresholds)
-        if isinstance(
-            DEFAULT_THRESHOLDS[args.dataset].get("acute_emergency_types"),
-            list,
-        ):
-            DEFAULT_THRESHOLDS[args.dataset]["acute_emergency_types"] = set(
-                DEFAULT_THRESHOLDS[args.dataset]["acute_emergency_types"]
-            )
     configured_latents = get_config_list(config, "LATENT_ORDER", None)
     if configured_latents:
         KNOWN_LATENTS[args.dataset] = set(str(latent) for latent in configured_latents)

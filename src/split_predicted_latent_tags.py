@@ -14,9 +14,6 @@ if "--validate-config-only" in sys.argv:
         default_dataset="physionet",
     )
 
-from dataset_config import get_first_available, load_dataset_config
-
-
 DATASET_MODEL = "physionet"
 INPUT_CSV = Path("../../data/predicted_latent_tags_230326.csv")
 
@@ -122,13 +119,7 @@ def split_predicted_latent_tags(
 
 def main() -> None:
     args = parse_args()
-    config = load_dataset_config(args.model, args.dataset_config_csv)
-    input_default = get_first_available(
-        config,
-        ["SPLIT_INPUT_CSV", "INPUT_CSV"],
-        str(INPUT_CSV),
-    )
-    input_csv_value = args.input_csv if args.input_csv is not None else input_default
+    input_csv_value = args.input_csv if args.input_csv is not None else str(INPUT_CSV)
     if input_csv_value is None:
         raise ValueError(
             "Provide --input-csv because this repo does not define a safe checked-in "

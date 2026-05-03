@@ -77,57 +77,63 @@ def create_mimiciii_causal_graph(
     G = nx.DiGraph()
 
     # ------------------------------------------------------------------
-    # Background variables from the approved latent causal DAG
+    # Observed background variables
     # ------------------------------------------------------------------
     background_vars = [
-        "BG_AGE",
-        "BG_SEX",
-        "BG_ETHNICITY_INSURANCE_LANGUAGE",
-        "BG_ADMISSION_CONTEXT",
-        "BG_ICU_UNIT",
+        "Age", "Gender", "Ethnicity", "BMI", "AdmissionType", "FirstCareUnit"
     ]
 
     # ------------------------------------------------------------------
-    # Approved latent clinical-state variables from the causal DAG
+    # Latent variables
     # ------------------------------------------------------------------
     latent_vars = [
-        "LAT_CHRONIC_BURDEN",
-        "LAT_INFLAMMATION_SEPSIS",
-        "LAT_GLOBAL_SEVERITY",
-        "LAT_CARDIAC_STRAIN",
-        "LAT_SHOCK",
-        "LAT_RESPIRATORY_FAILURE",
-        "LAT_RENAL_DYSFUNCTION",
-        "LAT_HEPATIC_COAG_DYSFUNCTION",
-        "LAT_NEUROLOGIC_DYSFUNCTION",
-        "LAT_METABOLIC_DERANGEMENT",
+        "ChronicBurden",       # baseline chronic disease burden / physiologic reserve
+        "AcuteInsult",         # acute diagnosis / precipitating insult
+        "Severity",            # overall illness severity
+        "Inflammation",        # infection / inflammatory burden
+        "Shock",               # hemodynamic failure / hypoperfusion
+        "RespFail",            # respiratory failure
+        "RenalDysfunction",    # kidney dysfunction
+        "HepaticDysfunction",  # liver dysfunction
+        "CoagDysfunction",     # coagulation / hematologic dysfunction
+        "NeuroDysfunction",    # neurologic dysfunction
+        "CardiacInjury",       # myocardial injury / cardiac dysfunction
+        "MetabolicDerangement" # acid-base / glucose / metabolic stress
     ]
 
     # ------------------------------------------------------------------
-    # Observed, treatment, outcome, and measurement-process nodes
+    # Observed variables (clinically aggregated MIMIC-style variables)
     # ------------------------------------------------------------------
     observed_vars = [
-        "OBS_BLOOD_PRESSURE",
-        "OBS_LACTATE",
-        "OBS_OXYGENATION",
-        "OBS_VENTILATOR_SETTINGS",
-        "OBS_CREATININE_BUN_URINE",
-        "OBS_BILIRUBIN_PLATELETS_INR",
-        "OBS_GCS_RASS",
-        "OBS_PH_ELECTROLYTES_GLUCOSE",
-        "OBS_TEMP_WBC_CULTURES",
-        "OBS_TROPONIN_ECG",
-        "OBS_CULTURES_MEDICATIONS",
-        "OBS_CREATININE_BUN_ELECTROLYTES",
-        "OBS_AVAILABILITY",
-        "OBS_LAB_COUNTS",
-        "OBS_VITAL_COUNTS",
-        "TRT_ANTIBIOTICS",
-        "TRT_VASOPRESSORS",
-        "TRT_MECH_VENT",
-        "TRT_DIALYSIS",
-        "MISS_MEASUREMENT_INTENSITY",
-        "OUT_MORTALITY",
+        # Hemodynamics / perfusion
+        "HR", "SBP", "DBP", "MAP", "Lactate", "UrineOutput",
+
+        # Respiratory
+        "RR", "SpO2", "PaO2", "PaCO2", "pH", "FiO2", "MechanicalVentilation",
+
+        # Renal / electrolytes
+        "Creatinine", "BUN", "Sodium", "Potassium", "Bicarbonate",
+
+        # Hepatic
+        "AST", "ALT", "Bilirubin", "Albumin",
+
+        # Hematologic / inflammatory
+        "Platelets", "WBC", "Temperature",
+
+        # Neurologic
+        "GCS",
+
+        # Cardiac
+        "Troponin",
+
+        # Metabolic
+        "Glucose", "AnionGap",
+
+        # ICU interventions
+        "Vasopressors", "FluidBolus",
+
+        # Outcome
+        "InHospitalMortality",
     ]
 
     G.add_nodes_from(background_vars, node_type="background")
@@ -135,79 +141,106 @@ def create_mimiciii_causal_graph(
     G.add_nodes_from(observed_vars, node_type="observed")
 
     # ------------------------------------------------------------------
-    # Final DAG edges from the approved causal graph specification
+    # Background -> latent baseline / context
     # ------------------------------------------------------------------
-    edges = [
-        ("BG_AGE", "LAT_CHRONIC_BURDEN"),
-        ("BG_AGE", "OUT_MORTALITY"),
-        ("BG_SEX", "LAT_CHRONIC_BURDEN"),
-        ("BG_ETHNICITY_INSURANCE_LANGUAGE", "MISS_MEASUREMENT_INTENSITY"),
-        ("BG_ETHNICITY_INSURANCE_LANGUAGE", "OUT_MORTALITY"),
-        ("BG_ADMISSION_CONTEXT", "LAT_INFLAMMATION_SEPSIS"),
-        ("BG_ADMISSION_CONTEXT", "LAT_GLOBAL_SEVERITY"),
-        ("BG_ADMISSION_CONTEXT", "MISS_MEASUREMENT_INTENSITY"),
-        ("BG_ICU_UNIT", "LAT_GLOBAL_SEVERITY"),
-        ("BG_ICU_UNIT", "MISS_MEASUREMENT_INTENSITY"),
+    for var in ["Age", "Gender", "Ethnicity", "BMI"]:
+        G.add_edge(var, "ChronicBurden")
 
-        ("LAT_CHRONIC_BURDEN", "LAT_GLOBAL_SEVERITY"),
-        ("LAT_CHRONIC_BURDEN", "LAT_RENAL_DYSFUNCTION"),
-        ("LAT_CHRONIC_BURDEN", "LAT_CARDIAC_STRAIN"),
-        ("LAT_CHRONIC_BURDEN", "OUT_MORTALITY"),
+    for var in ["AdmissionType", "FirstCareUnit"]:
+        G.add_edge(var, "AcuteInsult")
 
-        ("LAT_INFLAMMATION_SEPSIS", "LAT_GLOBAL_SEVERITY"),
-        ("LAT_INFLAMMATION_SEPSIS", "LAT_SHOCK"),
-        ("LAT_INFLAMMATION_SEPSIS", "LAT_HEPATIC_COAG_DYSFUNCTION"),
-        ("LAT_INFLAMMATION_SEPSIS", "TRT_ANTIBIOTICS"),
-        ("LAT_INFLAMMATION_SEPSIS", "OUT_MORTALITY"),
+    G.add_edge("ChronicBurden", "Severity")
+    G.add_edge("AcuteInsult", "Severity")
+    G.add_edge("AcuteInsult", "Inflammation")
 
-        ("LAT_GLOBAL_SEVERITY", "LAT_RESPIRATORY_FAILURE"),
-        ("LAT_GLOBAL_SEVERITY", "LAT_NEUROLOGIC_DYSFUNCTION"),
-        ("LAT_GLOBAL_SEVERITY", "LAT_METABOLIC_DERANGEMENT"),
-        ("LAT_GLOBAL_SEVERITY", "MISS_MEASUREMENT_INTENSITY"),
-        ("LAT_GLOBAL_SEVERITY", "OUT_MORTALITY"),
+    # ------------------------------------------------------------------
+    # Severity -> organ/system states
+    # ------------------------------------------------------------------
+    for state in [
+        "Inflammation", "Shock", "RespFail", "RenalDysfunction",
+        "HepaticDysfunction", "CoagDysfunction", "NeuroDysfunction",
+        "CardiacInjury", "MetabolicDerangement"
+    ]:
+        G.add_edge("Severity", state)
 
-        ("LAT_CARDIAC_STRAIN", "LAT_SHOCK"),
-        ("LAT_CARDIAC_STRAIN", "OUT_MORTALITY"),
+    # ------------------------------------------------------------------
+    # Clinically plausible cross-organ links
+    # ------------------------------------------------------------------
+    G.add_edge("Inflammation", "Shock")
+    G.add_edge("Inflammation", "CoagDysfunction")
+    G.add_edge("Inflammation", "MetabolicDerangement")
 
-        ("LAT_SHOCK", "LAT_RENAL_DYSFUNCTION"),
-        ("LAT_SHOCK", "LAT_HEPATIC_COAG_DYSFUNCTION"),
-        ("LAT_SHOCK", "LAT_METABOLIC_DERANGEMENT"),
-        ("LAT_SHOCK", "TRT_VASOPRESSORS"),
-        ("LAT_SHOCK", "OUT_MORTALITY"),
+    G.add_edge("Shock", "RenalDysfunction")
+    G.add_edge("Shock", "HepaticDysfunction")
+    G.add_edge("Shock", "MetabolicDerangement")
 
-        ("LAT_RESPIRATORY_FAILURE", "LAT_METABOLIC_DERANGEMENT"),
-        ("LAT_RESPIRATORY_FAILURE", "TRT_MECH_VENT"),
-        ("LAT_RESPIRATORY_FAILURE", "OUT_MORTALITY"),
+    G.add_edge("RespFail", "MetabolicDerangement")
+    G.add_edge("RenalDysfunction", "MetabolicDerangement")
+    G.add_edge("CardiacInjury", "Shock")
 
-        ("LAT_RENAL_DYSFUNCTION", "LAT_METABOLIC_DERANGEMENT"),
-        ("LAT_RENAL_DYSFUNCTION", "TRT_DIALYSIS"),
-        ("LAT_RENAL_DYSFUNCTION", "OUT_MORTALITY"),
+    # ------------------------------------------------------------------
+    # Latent -> observed measurements
+    # ------------------------------------------------------------------
+    # Inflammation
+    G.add_edge("Inflammation", "WBC")
+    G.add_edge("Inflammation", "Temperature")
 
-        ("LAT_HEPATIC_COAG_DYSFUNCTION", "OUT_MORTALITY"),
-        ("LAT_NEUROLOGIC_DYSFUNCTION", "OUT_MORTALITY"),
-        ("LAT_METABOLIC_DERANGEMENT", "OUT_MORTALITY"),
+    # Shock / perfusion
+    for var in ["SBP", "DBP", "MAP", "HR", "Lactate", "UrineOutput", "Vasopressors", "FluidBolus"]:
+        G.add_edge("Shock", var)
 
-        ("LAT_SHOCK", "OBS_BLOOD_PRESSURE"),
-        ("LAT_SHOCK", "OBS_LACTATE"),
-        ("LAT_RESPIRATORY_FAILURE", "OBS_OXYGENATION"),
-        ("LAT_RENAL_DYSFUNCTION", "OBS_CREATININE_BUN_URINE"),
-        ("LAT_HEPATIC_COAG_DYSFUNCTION", "OBS_BILIRUBIN_PLATELETS_INR"),
-        ("LAT_NEUROLOGIC_DYSFUNCTION", "OBS_GCS_RASS"),
-        ("LAT_METABOLIC_DERANGEMENT", "OBS_PH_ELECTROLYTES_GLUCOSE"),
-        ("LAT_INFLAMMATION_SEPSIS", "OBS_TEMP_WBC_CULTURES"),
-        ("LAT_CARDIAC_STRAIN", "OBS_TROPONIN_ECG"),
+    # Respiratory failure
+    for var in ["RR", "SpO2", "PaO2", "PaCO2", "pH", "FiO2", "MechanicalVentilation"]:
+        G.add_edge("RespFail", var)
 
-        ("TRT_ANTIBIOTICS", "OBS_CULTURES_MEDICATIONS"),
-        ("TRT_VASOPRESSORS", "OBS_BLOOD_PRESSURE"),
-        ("TRT_MECH_VENT", "OBS_OXYGENATION"),
-        ("TRT_MECH_VENT", "OBS_VENTILATOR_SETTINGS"),
-        ("TRT_DIALYSIS", "OBS_CREATININE_BUN_ELECTROLYTES"),
+    # Renal dysfunction
+    for var in ["Creatinine", "BUN", "UrineOutput", "Potassium", "Sodium", "Bicarbonate", "pH", "AnionGap"]:
+        G.add_edge("RenalDysfunction", var)
 
-        ("MISS_MEASUREMENT_INTENSITY", "OBS_AVAILABILITY"),
-        ("MISS_MEASUREMENT_INTENSITY", "OBS_LAB_COUNTS"),
-        ("MISS_MEASUREMENT_INTENSITY", "OBS_VITAL_COUNTS"),
-    ]
-    G.add_edges_from(edges)
+    # Hepatic dysfunction
+    for var in ["AST", "ALT", "Bilirubin", "Albumin"]:
+        G.add_edge("HepaticDysfunction", var)
+
+    # Coagulation dysfunction
+    G.add_edge("CoagDysfunction", "Platelets")
+
+    # Neurologic dysfunction
+    G.add_edge("NeuroDysfunction", "GCS")
+
+    # Cardiac injury
+    G.add_edge("CardiacInjury", "Troponin")
+
+    # Metabolic derangement
+    for var in ["Lactate", "Glucose", "Bicarbonate", "pH", "AnionGap"]:
+        G.add_edge("MetabolicDerangement", var)
+
+    # ------------------------------------------------------------------
+    # Interventions affect downstream measurements
+    # ------------------------------------------------------------------
+    G.add_edge("MechanicalVentilation", "PaO2")
+    G.add_edge("MechanicalVentilation", "PaCO2")
+    G.add_edge("MechanicalVentilation", "pH")
+    G.add_edge("MechanicalVentilation", "SpO2")
+
+    G.add_edge("FiO2", "PaO2")
+    G.add_edge("FiO2", "SpO2")
+
+    G.add_edge("Vasopressors", "MAP")
+    G.add_edge("Vasopressors", "SBP")
+    G.add_edge("FluidBolus", "MAP")
+    G.add_edge("FluidBolus", "UrineOutput")
+
+    # ------------------------------------------------------------------
+    # Outcome
+    # ------------------------------------------------------------------
+    G.add_edge("Severity", "InHospitalMortality")
+    G.add_edge("Age", "InHospitalMortality")
+    for state in [
+        "Shock", "RespFail", "RenalDysfunction", "HepaticDysfunction",
+        "CoagDysfunction", "NeuroDysfunction", "CardiacInjury",
+        "MetabolicDerangement"
+    ]:
+        G.add_edge(state, "InHospitalMortality")
 
     if not nx.is_directed_acyclic_graph(G):
         raise ValueError("Constructed graph is not a DAG")
