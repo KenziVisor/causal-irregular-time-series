@@ -28,7 +28,6 @@ from torch.utils.data import Dataset, DataLoader
 from dataset_config import (
     get_config_int,
     get_config_scalar,
-    get_first_available,
     load_dataset_config,
 )
 
@@ -64,7 +63,13 @@ def parse_args():
         ),
     )
     parser.add_argument("--latent-tags-path", default=None)
-    parser.add_argument("--physionet-pkl-path", default=None)
+    parser.add_argument(
+        "--dataset-pkl-path",
+        "--physionet-pkl-path",
+        dest="dataset_pkl_path",
+        default=None,
+        help="Path to the processed dataset pickle. --physionet-pkl-path is a deprecated alias.",
+    )
     parser.add_argument("--results-txt-path", default=None)
     parser.add_argument(
         "--validate-config-only",
@@ -398,34 +403,19 @@ def main():
     OUTCOME_COL = str(get_config_scalar(config, "OUTCOME_COL", OUTCOME_COL))
     seed = int(get_config_int(config, "SEED", SEED) or SEED)
 
-    latent_tags_default = get_first_available(
-        config,
-        ["MORTALITY_LATENT_TAGS_PATH", "LATENT_TAGS_PATH"],
-        latent_tags_csv_path,
-    )
-    physionet_pkl_default = get_first_available(
-        config,
-        ["MORTALITY_PKL_PATH", "DATASET_PKL_PATH", "PHYSIONET_PKL_PATH"],
-        physionet_ts_oc_ids_pkl_path,
-    )
-    results_default = get_first_available(
-        config,
-        ["MORTALITY_RESULTS_TXT_PATH", "RESULTS_TXT_PATH"],
-        results_txt_path,
-    )
     latent_path = resolve_runtime_path(
         args.latent_tags_path,
-        str(latent_tags_default),
+        latent_tags_csv_path,
         "LATENT_TAGS_PATH",
     )
     physionet_pkl_path = resolve_runtime_path(
-        args.physionet_pkl_path,
-        str(physionet_pkl_default),
-        "PHYSIONET_PKL_PATH",
+        args.dataset_pkl_path,
+        physionet_ts_oc_ids_pkl_path,
+        "DATASET_PKL_PATH",
     )
     results_path = resolve_output_path(
         args.results_txt_path,
-        str(results_default),
+        results_txt_path,
         "RESULTS_TXT_PATH",
     )
     print(

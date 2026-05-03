@@ -15,7 +15,6 @@ if "--validate-config-only" in sys.argv:
 
 import matplotlib.pyplot as plt
 import networkx as nx
-from dataset_config import get_first_available, load_dataset_config
 
 
 DEFAULT_GRAPH_PKL_PATH = "../data/causal_graph.pkl"
@@ -64,83 +63,65 @@ def create_physionet2012_causal_graph(
     graph_pkl_path: str | None = None,
 ) -> nx.DiGraph:
     """
-    Create a directed acyclic graph (DAG) representing a clinically-plausible
+    Create a directed acyclic graph (DAG) representing the latent-variable
     causal structure for PhysioNet / CinC Challenge 2012 variables.
 
     Returns
     -------
     nx.DiGraph
-        A directed graph where nodes are variables (observed + latent)
-        and edges represent assumed causal relationships.
+        A directed graph where nodes are variables (background + latent +
+        observed/process/outcome nodes) and edges represent assumed causal
+        relationships.
     """
 
     G = nx.DiGraph()
 
     # ------------------------------------------------------------------
-    # Observed background variables
+    # Background variables
     # ------------------------------------------------------------------
     background_vars = [
-        "Age", "Gender", "Height", "Weight", "ICUType"
+        "BG_Age",
+        "BG_Gender",
+        "BG_HeightWeightBMI",
+        "BG_ICUType",
     ]
 
     # ------------------------------------------------------------------
-    # Latent variables (explicitly modeled to keep DAG clean)
+    # Latent variables
     # ------------------------------------------------------------------
     latent_vars = [
-        "ChronicRisk",        # Chronic health / baseline risk
-        "AcuteInsult",        # Acute insult / diagnosis mix
-        "Severity",           # Overall illness severity
-        "Shock",              # Hemodynamic failure
-        "RespFail",           # Respiratory failure
-        "RenalFail",          # Renal dysfunction
-        "HepFail",            # Hepatic dysfunction
-        "HemeFail",           # Hematologic dysfunction
-        "Inflam",             # Inflammation / infection burden
-        "NeuroFail",          # Neurologic dysfunction
-        "CardInj",            # Cardiac injury
-        "Metab",              # Metabolic derangement
+        "LAT_CHRONIC_BASELINE_RISK",
+        "LAT_INFLAMMATION_SEPSIS_BURDEN",
+        "LAT_GLOBAL_SEVERITY",
+        "LAT_SHOCK",
+        "LAT_RESPIRATORY_FAILURE",
+        "LAT_RENAL_DYSFUNCTION",
+        "LAT_HEPATIC_DYSFUNCTION",
+        "LAT_COAG_HEME_DYSFUNCTION",
+        "LAT_NEUROLOGIC_DYSFUNCTION",
+        "LAT_CARDIAC_INJURY_STRAIN",
+        "LAT_METABOLIC_DERANGEMENT",
     ]
 
     # ------------------------------------------------------------------
-    # Observed PhysioNet 2012 variables
+    # Observed measurement, treatment/care-process, missingness, and outcome nodes
     # ------------------------------------------------------------------
     observed_vars = [
-        # Hemodynamics
-        "SysABP", "DiasABP", "MAP",
-        "NISysABP", "NIDiasABP", "NIMAP",
-        "HR",
-
-        # Perfusion / output
-        "Lactate", "Urine",
-
-        # Respiratory
-        "RespRate", "PaO2", "SaO2", "PaCO2", "pH",
-        "MechVent", "FiO2",
-
-        # Renal / electrolytes
-        "Creatinine", "BUN", "K", "Na", "Mg", "HCO3",
-
-        # Hepatic / nutrition
-        "ALT", "AST", "Bilirubin", "ALP",
-        "Albumin", "Cholesterol",
-
-        # Hematologic
-        "Platelets", "HCT",
-
-        # Inflammation
-        "WBC", "Temp",
-
-        # Neurologic
-        "GCS",
-
-        # Cardiac
-        "TropI", "TropT",
-
-        # Metabolic
-        "Glucose",
-
-        # Outcome
-        "Death",
+        "OBS_TempWBCInflam",
+        "OBS_TroponinHR",
+        "OBS_RespiratoryGasExchange",
+        "OBS_Hemodynamics",
+        "OBS_RenalLabsUrine",
+        "OBS_LiverLabs",
+        "OBS_CBCPlatelets",
+        "OBS_GCS",
+        "OBS_MetabolicLabsABG",
+        "OBS_AvailabilityCounts",
+        "TRT_MechanicalVentilation",
+        "MISS_LactateABGOrdering",
+        "MISS_TroponinOrdering",
+        "MISS_MeasurementIntensity",
+        "OUT_InHospitalMortality",
     ]
 
     # ------------------------------------------------------------------
@@ -151,117 +132,68 @@ def create_physionet2012_causal_graph(
     G.add_nodes_from(observed_vars, node_type="observed")
 
     # ------------------------------------------------------------------
-    # Background -> latent
+    # Final latent causal DAG edge list
     # ------------------------------------------------------------------
-    for var in background_vars:
-        G.add_edge(var, "ChronicRisk")
+    edges = [
+        ("BG_Age", "LAT_CHRONIC_BASELINE_RISK"),
+        ("BG_Gender", "LAT_CHRONIC_BASELINE_RISK"),
+        ("BG_HeightWeightBMI", "LAT_CHRONIC_BASELINE_RISK"),
+        ("BG_ICUType", "LAT_CHRONIC_BASELINE_RISK"),
+        ("BG_ICUType", "LAT_CARDIAC_INJURY_STRAIN"),
+        ("BG_ICUType", "MISS_MeasurementIntensity"),
 
-    G.add_edge("ChronicRisk", "Severity")
-    G.add_edge("AcuteInsult", "Severity")
+        ("LAT_CHRONIC_BASELINE_RISK", "LAT_GLOBAL_SEVERITY"),
+        ("LAT_CHRONIC_BASELINE_RISK", "OUT_InHospitalMortality"),
 
-    # ------------------------------------------------------------------
-    # Severity -> organ failures / states
-    # ------------------------------------------------------------------
-    organ_states = [
-        "Shock", "RespFail", "RenalFail", "HepFail",
-        "HemeFail", "Inflam", "NeuroFail", "CardInj", "Metab"
+        ("LAT_INFLAMMATION_SEPSIS_BURDEN", "LAT_GLOBAL_SEVERITY"),
+        ("LAT_INFLAMMATION_SEPSIS_BURDEN", "LAT_SHOCK"),
+        ("LAT_INFLAMMATION_SEPSIS_BURDEN", "LAT_COAG_HEME_DYSFUNCTION"),
+        ("LAT_INFLAMMATION_SEPSIS_BURDEN", "OBS_TempWBCInflam"),
+
+        ("LAT_CARDIAC_INJURY_STRAIN", "LAT_SHOCK"),
+        ("LAT_CARDIAC_INJURY_STRAIN", "OUT_InHospitalMortality"),
+        ("LAT_CARDIAC_INJURY_STRAIN", "OBS_TroponinHR"),
+        ("LAT_CARDIAC_INJURY_STRAIN", "MISS_TroponinOrdering"),
+
+        ("LAT_RESPIRATORY_FAILURE", "LAT_METABOLIC_DERANGEMENT"),
+        ("LAT_RESPIRATORY_FAILURE", "TRT_MechanicalVentilation"),
+        ("LAT_RESPIRATORY_FAILURE", "OUT_InHospitalMortality"),
+        ("LAT_RESPIRATORY_FAILURE", "OBS_RespiratoryGasExchange"),
+
+        ("LAT_SHOCK", "LAT_RENAL_DYSFUNCTION"),
+        ("LAT_SHOCK", "LAT_HEPATIC_DYSFUNCTION"),
+        ("LAT_SHOCK", "LAT_METABOLIC_DERANGEMENT"),
+        ("LAT_SHOCK", "OUT_InHospitalMortality"),
+        ("LAT_SHOCK", "OBS_Hemodynamics"),
+        ("LAT_SHOCK", "MISS_LactateABGOrdering"),
+
+        ("LAT_RENAL_DYSFUNCTION", "LAT_METABOLIC_DERANGEMENT"),
+        ("LAT_RENAL_DYSFUNCTION", "OUT_InHospitalMortality"),
+        ("LAT_RENAL_DYSFUNCTION", "OBS_RenalLabsUrine"),
+
+        ("LAT_HEPATIC_DYSFUNCTION", "LAT_COAG_HEME_DYSFUNCTION"),
+        ("LAT_HEPATIC_DYSFUNCTION", "OBS_LiverLabs"),
+
+        ("LAT_COAG_HEME_DYSFUNCTION", "OUT_InHospitalMortality"),
+        ("LAT_COAG_HEME_DYSFUNCTION", "OBS_CBCPlatelets"),
+
+        ("LAT_NEUROLOGIC_DYSFUNCTION", "OUT_InHospitalMortality"),
+        ("LAT_NEUROLOGIC_DYSFUNCTION", "OBS_GCS"),
+
+        ("LAT_METABOLIC_DERANGEMENT", "OUT_InHospitalMortality"),
+        ("LAT_METABOLIC_DERANGEMENT", "OBS_MetabolicLabsABG"),
+
+        ("LAT_GLOBAL_SEVERITY", "OUT_InHospitalMortality"),
+        ("LAT_GLOBAL_SEVERITY", "TRT_MechanicalVentilation"),
+        ("LAT_GLOBAL_SEVERITY", "MISS_MeasurementIntensity"),
+
+        ("TRT_MechanicalVentilation", "OBS_RespiratoryGasExchange"),
+        ("MISS_MeasurementIntensity", "OBS_AvailabilityCounts"),
+        ("MISS_LactateABGOrdering", "OBS_MetabolicLabsABG"),
+        ("MISS_LactateABGOrdering", "OBS_RespiratoryGasExchange"),
+        ("MISS_TroponinOrdering", "OBS_TroponinHR"),
     ]
-
-    for state in organ_states:
-        G.add_edge("Severity", state)
-
-    # ------------------------------------------------------------------
-    # Shock -> measurements
-    # ------------------------------------------------------------------
-    shock_outputs = [
-        "SysABP", "DiasABP", "MAP",
-        "NISysABP", "NIDiasABP", "NIMAP",
-        "HR", "Lactate", "Urine"
-    ]
-
-    for var in shock_outputs:
-        G.add_edge("Shock", var)
-
-    # ------------------------------------------------------------------
-    # Respiratory failure -> measurements & interventions
-    # ------------------------------------------------------------------
-    resp_outputs = ["RespRate", "PaO2", "SaO2", "PaCO2", "pH"]
-    for var in resp_outputs:
-        G.add_edge("RespFail", var)
-
-    G.add_edge("RespFail", "MechVent")
-    G.add_edge("RespFail", "FiO2")
-
-    # Interventions affect gas exchange
-    G.add_edge("MechVent", "PaCO2")
-    G.add_edge("MechVent", "pH")
-    G.add_edge("FiO2", "PaO2")
-    G.add_edge("FiO2", "SaO2")
-
-    # ------------------------------------------------------------------
-    # Renal dysfunction
-    # ------------------------------------------------------------------
-    renal_outputs = [
-        "Creatinine", "BUN", "Urine",
-        "K", "Na", "Mg", "HCO3", "pH"
-    ]
-
-    for var in renal_outputs:
-        G.add_edge("RenalFail", var)
-
-    # ------------------------------------------------------------------
-    # Hepatic dysfunction
-    # ------------------------------------------------------------------
-    hepatic_outputs = [
-        "ALT", "AST", "Bilirubin", "ALP",
-        "Albumin", "Cholesterol"
-    ]
-
-    for var in hepatic_outputs:
-        G.add_edge("HepFail", var)
-
-    # ------------------------------------------------------------------
-    # Hematologic dysfunction
-    # ------------------------------------------------------------------
-    for var in ["Platelets", "HCT"]:
-        G.add_edge("HemeFail", var)
-
-    # ------------------------------------------------------------------
-    # Inflammation
-    # ------------------------------------------------------------------
-    G.add_edge("Inflam", "WBC")
-    G.add_edge("Inflam", "Temp")
-    G.add_edge("Inflam", "Shock")  # sepsis pathway
-
-    # ------------------------------------------------------------------
-    # Neurologic dysfunction
-    # ------------------------------------------------------------------
-    G.add_edge("NeuroFail", "GCS")
-
-    # ------------------------------------------------------------------
-    # Cardiac injury
-    # ------------------------------------------------------------------
-    G.add_edge("CardInj", "TropI")
-    G.add_edge("CardInj", "TropT")
-    G.add_edge("CardInj", "Shock")
-
-    # ------------------------------------------------------------------
-    # Metabolic derangement
-    # ------------------------------------------------------------------
-    for var in ["Glucose", "Lactate", "HCO3", "pH"]:
-        G.add_edge("Metab", var)
-
-    # ------------------------------------------------------------------
-    # Outcome
-    # ------------------------------------------------------------------
-    G.add_edge("Severity", "Death")
-    for state in [
-        "Shock", "RespFail", "RenalFail", "HepFail",
-        "HemeFail", "NeuroFail", "CardInj"
-    ]:
-        G.add_edge(state, "Death")
-
-    G.add_edge("Age", "Death")
+    G.add_edges_from(edges)
 
     # ------------------------------------------------------------------
     # Sanity check: ensure DAG
@@ -287,7 +219,6 @@ def create_physionet2012_causal_graph(
             if size > 0:
                 print(f"      Saved graph pickle ({size} bytes).")
     return G
-
 
 def draw_graph(
     G: nx.DiGraph,
@@ -439,21 +370,8 @@ def draw_graph(
 
 def main() -> None:
     args = parse_args()
-    config = load_dataset_config("physionet", args.dataset_config_csv)
-    graph_pkl_path = args.graph_pkl_path or str(
-        get_first_available(
-            config,
-            ["DEFAULT_GRAPH_PKL_PATH", "GRAPH_PKL_PATH"],
-            DEFAULT_GRAPH_PKL_PATH,
-        )
-    )
-    graph_png_path = args.graph_png_path or str(
-        get_first_available(
-            config,
-            ["DEFAULT_GRAPH_PNG_PATH", "GRAPH_PNG_PATH"],
-            DEFAULT_GRAPH_PNG_PATH,
-        )
-    )
+    graph_pkl_path = args.graph_pkl_path or DEFAULT_GRAPH_PKL_PATH
+    graph_png_path = args.graph_png_path or DEFAULT_GRAPH_PNG_PATH
     print("=== Building PhysioNet 2012 causal DAG ===")
     print("[1/2] Creating graph structure")
     g = create_physionet2012_causal_graph(

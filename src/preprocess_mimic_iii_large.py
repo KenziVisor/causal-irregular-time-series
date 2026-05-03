@@ -16,7 +16,6 @@ from tqdm import tqdm
 import numpy as np
 import os
 
-from dataset_config import get_config_int, get_config_scalar, get_first_available, load_dataset_config
 from preprocess_mimic_iii_large_contract import (
     assert_physionet_compatible_output,
     build_canonical_oc,
@@ -45,18 +44,8 @@ def parse_args():
 
 
 _ARGS = parse_args()
-_CONFIG = load_dataset_config("mimic", _ARGS.dataset_config_csv)
-RAW_DATA_PATH = _ARGS.raw_data_path or str(
-    get_first_available(
-        _CONFIG,
-        ["PREPROCESS_RAW_DATA_PATH", "RAW_DATA_PATH"],
-        RAW_DATA_PATH,
-    )
-)
-OUTPUT_PATH = _ARGS.output_path or str(
-    get_config_scalar(_CONFIG, "PREPROCESS_OUTPUT_PATH", OUTPUT_PATH)
-)
-TOTAL_STAGES = int(get_config_int(_CONFIG, "TOTAL_STAGES", TOTAL_STAGES) or TOTAL_STAGES)
+RAW_DATA_PATH = _ARGS.raw_data_path or RAW_DATA_PATH
+OUTPUT_PATH = _ARGS.output_path or OUTPUT_PATH
 
 
 def log_stage(step: int, message: str) -> None:

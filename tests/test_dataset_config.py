@@ -21,8 +21,8 @@ def test_load_physionet_config() -> None:
     config = load_dataset_config("physionet")
     assert isinstance(config["TREATMENTS"], list)
     assert isinstance(config["BACKGROUND_FEATURE_COLUMNS"], list)
-    assert isinstance(config["DEFAULT_THRESHOLDS"], dict)
-    assert "Severity" in config["TREATMENTS"]
+    assert "DEFAULT_THRESHOLDS" not in config
+    assert "LAT_GLOBAL_SEVERITY" in config["TREATMENTS"]
     assert "Age" in config["BACKGROUND_FEATURE_COLUMNS"]
 
 
@@ -30,9 +30,9 @@ def test_load_mimic_config() -> None:
     config = load_dataset_config("mimic")
     assert isinstance(config["TREATMENTS"], list)
     assert isinstance(config["BACKGROUND_FEATURE_COLUMNS"], list)
-    assert isinstance(config["DEFAULT_THRESHOLDS"], dict)
-    assert isinstance(config["PICKLE_TS_SUMMARY_SPECS"], dict)
-    assert "Severity" in config["TREATMENTS"]
+    assert "DEFAULT_THRESHOLDS" not in config
+    assert "PICKLE_TS_SUMMARY_SPECS" not in config
+    assert "LAT_GLOBAL_SEVERITY" in config["TREATMENTS"]
 
 
 def test_typed_helpers_and_precedence() -> None:
