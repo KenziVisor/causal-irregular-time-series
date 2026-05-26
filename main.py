@@ -29,6 +29,11 @@ STATUS_FAILED = "failed"
 STATUS_SKIPPED = "skipped"
 
 DATASET_CHOICES = ("physionet", "mimic")
+MODEL_TYPE_CHOICES = ["CausalForest", "LinearDML", "CausalPFN"]
+CAUSALPFN_SKIP_REASON = (
+    "Skipped because MODEL_TYPE=CausalPFN does not use EconML sensitivity "
+    "analysis or permutation tests in this pipeline."
+)
 STAGE_SEQUENCE = [
     "graph",
     "majority_vote",
@@ -111,6 +116,12 @@ def parse_args() -> argparse.Namespace:
         help="Root directory for the orchestrated run. Default: current working directory.",
     )
     parser.add_argument(
+        "--model-type",
+        choices=MODEL_TYPE_CHOICES,
+        default=None,
+        help="Override MODEL_TYPE from the dataset config for this orchestrated run.",
+    )
+    parser.add_argument(
         "--validate-config-only",
         action="store_true",
         help="Resolve dataset config values and child commands, then exit.",
@@ -169,7 +180,11 @@ def build_run_context(args: argparse.Namespace) -> RunContext:
     repo_root = Path(__file__).resolve().parent
     config = load_dataset_config(args.dataset, args.dataset_config_csv)
     dataset_config_csv = Path(str(config["__config_csv_path__"])).resolve()
-    model_type = str(get_config_scalar(config, "MODEL_TYPE", "CausalForest"))
+    model_type = str(
+        args.model_type
+        if args.model_type is not None
+        else get_config_scalar(config, "MODEL_TYPE", "CausalForest")
+    )
     trials = get_config_int(config, "TRIALS", 10)
     if trials is None:
         trials = 10
@@ -340,9 +355,14 @@ def build_run_context(args: argparse.Namespace) -> RunContext:
     )
 
 
+def is_causalpfn_model(context: RunContext) -> bool:
+    return context.model_type == "CausalPFN"
+
+
 def validate_config_only(args: argparse.Namespace, context: RunContext) -> None:
     resolved = validate_script_config("main.py", context.config)
     print_resolved_config_summary("main.py", context.config, resolved)
+    print(f"  effective_MODEL_TYPE: {context.model_type}")
 
     if args.latent_tags_dir is not None:
         resolve_directory_path(str(context.latent_tags_dir), "latent-tags dir")
@@ -359,6 +379,12 @@ def validate_config_only(args: argparse.Namespace, context: RunContext) -> None:
         ("analyze_cate_results", build_analyze_command),
         ("permutations_test", build_permutations_command),
     ]:
+        if is_causalpfn_model(context) and stage_name in {
+            "analyze_cate_results",
+            "permutations_test",
+        }:
+            print(f"    {stage_name}: SKIPPED - {CAUSALPFN_SKIP_REASON}")
+            continue
         command = builder(context)
         print(f"    {stage_name}: {format_command(command)}")
 
@@ -884,8 +910,16 @@ def orchestrate(context: RunContext) -> tuple[bool, str | None]:
                 )
             else:
                 print("cate_estimation.py completed successfully")
+                if is_causalpfn_model(context):
+                    mark_stages_skipped(
+                        context,
+                        ["analyze_cate_results", "permutations_test"],
+                        lock,
+                        CAUSALPFN_SKIP_REASON,
+                    )
+                    print(CAUSALPFN_SKIP_REASON)
 
-        if foreground_ok:
+        if foreground_ok and not is_causalpfn_model(context):
             reset_stage_directory(context.stage_dirs["analyze_cate_results"])
             print("[5/7] Running analyze_cate_results.py")
             if not run_stage_subprocess(
@@ -906,7 +940,7 @@ def orchestrate(context: RunContext) -> tuple[bool, str | None]:
             else:
                 print("analyze_cate_results.py completed successfully")
 
-        if foreground_ok:
+        if foreground_ok and not is_causalpfn_model(context):
             reset_stage_directory(context.stage_dirs["permutations_test"])
             print(f"[6/7] Running permutations_test.py with {context.trials} trials")
             if not run_stage_subprocess(

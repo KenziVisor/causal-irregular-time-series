@@ -1,14 +1,22 @@
 # Python version (for documentation, not enforced by pip)
 # python==3.10
 
+# Core causal inference stack
 econml==0.16.0
-scikit-learn==1.4.2
+scikit-learn==1.5.2
 numpy==1.26.4
 scipy==1.11.4
 
+# Data / plotting / graph utilities
 pandas==2.2.2
 matplotlib==3.8.4
 networkx==3.2.1
 optuna==3.6.1
-torch==2.2.2
+torch==2.3.1
 tqdm==4.66.4
+
+# CausalPFN baseline
+# CausalPFN 0.1.4 requires scikit-learn>=1.5.2 and uses FAISS + Hugging Face Hub.
+causalpfn==0.1.4
+faiss-cpu==1.9.0
+huggingface_hub==0.32.4
