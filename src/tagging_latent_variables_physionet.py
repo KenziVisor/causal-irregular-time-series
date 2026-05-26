@@ -26,7 +26,7 @@ from dataset_config import (
 pkl_path = "../../data/processed/physionet2012_ts_oc_ids.pkl"
 output_csv_path = "latent_tags_optimized.csv"
 
-OPTIMIZED = True
+OPTIMIZED = False
 THRESHOLDS_PATH = "../../data/optimal_thresholds.txt"
 DEFAULT_THRESHOLDS = {
     # LAT_CHRONIC_BASELINE_RISK
