@@ -31,9 +31,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch
 
-from dataset_config import get_config_list, load_dataset_config
-
-
 # ---------------------------------------------------------------------------
 # Compatibility placeholders for pickle.load
 # ---------------------------------------------------------------------------
@@ -46,30 +43,12 @@ def _make_placeholder(name: str):
     return _placeholder
 
 
-for _name in {
-    "tag_chronic_burden",
-    "tag_acute_insult",
-    "tag_severity",
-    "tag_inflammation",
-    "tag_shock",
-    "tag_respfail",
-    "tag_renal_dysfunction",
-    "tag_hepatic_dysfunction",
-    "tag_coag_dysfunction",
-    "tag_neuro_dysfunction",
-    "tag_cardiac_injury",
-    "tag_metabolic_derangement",
-    "tag_renalfail",
-    "tag_hepfail",
-    "tag_hemefail",
-    "tag_inflam",
-    "tag_neurofail",
-    "tag_cardinj",
-    "tag_metab",
-    "tag_chronicrisk",
-    "tag_acuteinsult",
-}:
-    globals()[_name] = _make_placeholder(_name)
+class CompatibleRuleUnpickler(pickle.Unpickler):
+    def find_class(self, module: str, name: str) -> Any:
+        try:
+            return super().find_class(module, name)
+        except AttributeError:
+            return _make_placeholder(name)
 
 
 # ---------------------------------------------------------------------------
@@ -173,38 +152,6 @@ DEFAULT_THRESHOLDS = {
     "physionet": PHYSIONET_DEFAULT_THRESHOLDS,
 }
 
-KNOWN_LATENTS = {
-    "mimic": {
-        "ChronicBurden",
-        "AcuteInsult",
-        "Severity",
-        "Inflammation",
-        "Shock",
-        "RespFail",
-        "RenalDysfunction",
-        "HepaticDysfunction",
-        "CoagDysfunction",
-        "NeuroDysfunction",
-        "CardiacInjury",
-        "MetabolicDerangement",
-    },
-    "physionet": {
-        "Severity",
-        "Shock",
-        "RespFail",
-        "RenalFail",
-        "HepFail",
-        "HemeFail",
-        "Inflam",
-        "NeuroFail",
-        "CardInj",
-        "Metab",
-        "ChronicRisk",
-        "AcuteInsult",
-    },
-}
-
-
 # ---------------------------------------------------------------------------
 # Plot model
 # ---------------------------------------------------------------------------
@@ -264,8 +211,7 @@ def parse_args() -> argparse.Namespace:
         "--dataset-config-csv",
         default=None,
         help=(
-            "Path to the dataset global-variables CSV. If omitted, use the default "
-            "config for --dataset."
+            "Accepted for CLI compatibility; latent names are read from --pickle-path."
         ),
     )
     parser.add_argument("--pickle-path", required=True, help="Path to the saved latent decision-tree pickle.")
@@ -340,6 +286,14 @@ def describe_callable(obj: Any) -> str:
     return repr(obj)
 
 
+def get_callable_rule_name(obj: Any) -> str:
+    if isinstance(obj, partial):
+        return getattr(obj.func, "__name__", repr(obj.func))
+    if callable(obj):
+        return getattr(obj, "__name__", repr(obj))
+    return type(obj).__name__
+
+
 def extract_thresholds(dataset: str, obj: Any) -> Dict[str, Any]:
     thresholds = dict(DEFAULT_THRESHOLDS[dataset])
     if isinstance(obj, partial):
@@ -357,7 +311,7 @@ def extract_thresholds(dataset: str, obj: Any) -> Dict[str, Any]:
 def load_pickle_dict(pickle_path: Path) -> Dict[str, Any]:
     try:
         with pickle_path.open("rb") as handle:
-            payload = pickle.load(handle)
+            payload = CompatibleRuleUnpickler(handle).load()
     except FileNotFoundError:
         fail(f"pickle file does not exist: {pickle_path}")
     except pickle.UnpicklingError as exc:
@@ -375,6 +329,17 @@ def load_pickle_dict(pickle_path: Path) -> Dict[str, Any]:
     if not payload:
         fail("pickle dict is empty; no latent names were found.")
     return payload
+
+
+def get_latent_names_from_payload(payload: Dict[str, Any]) -> List[str]:
+    latent_names = list(payload.keys())
+    non_string_names = [name for name in latent_names if not isinstance(name, str)]
+    if non_string_names:
+        fail(
+            "pickle latent names must be strings; found non-string keys: "
+            f"{non_string_names}"
+        )
+    return latent_names
 
 
 # ---------------------------------------------------------------------------
@@ -468,9 +433,11 @@ def make_score_spec(title: str, domain_boxes: Sequence[str], score_label: str, d
     return PlotSpec(title=title, nodes=nodes, edges=edges)
 
 
-def make_fallback_spec(title: str, callable_text: str) -> PlotSpec:
+def make_fallback_spec(title: str, callable_rule_name: str, callable_text: str) -> PlotSpec:
     message = (
         f"No explicit plotting spec available for {title}.\n"
+        f"Latent name: {title}\n"
+        f"Callable rule name: {callable_rule_name}\n"
         f"Pickle contains callable: {callable_text}"
     )
     nodes = [PlotNode(node_id="fallback", label=message, level=0, kind="fallback")]
@@ -481,8 +448,8 @@ def make_fallback_spec(title: str, callable_text: str) -> PlotSpec:
 # Dataset-specific plotting specs
 # ---------------------------------------------------------------------------
 
-def mimic_plot_spec(latent_name: str, thresholds: Dict[str, Any]) -> PlotSpec | None:
-    if latent_name == "ChronicBurden":
+def mimic_plot_spec(latent_name: str, rule_name: str, thresholds: Dict[str, Any]) -> PlotSpec | None:
+    if latent_name == "ChronicBurden" or rule_name == "tag_chronic_burden":
         return make_or_spec(
             latent_name,
             [
@@ -492,7 +459,7 @@ def mimic_plot_spec(latent_name: str, thresholds: Dict[str, Any]) -> PlotSpec | 
             ],
         )
 
-    if latent_name == "AcuteInsult":
+    if latent_name == "AcuteInsult" or rule_name == "tag_acute_insult":
         return make_or_spec(
             latent_name,
             [
@@ -503,7 +470,7 @@ def mimic_plot_spec(latent_name: str, thresholds: Dict[str, Any]) -> PlotSpec | 
             ],
         )
 
-    if latent_name == "Severity":
+    if latent_name == "Severity" or rule_name in {"tag_severity", "tag_global_severity"}:
         return make_or_spec(
             latent_name,
             [
@@ -518,7 +485,7 @@ def mimic_plot_spec(latent_name: str, thresholds: Dict[str, Any]) -> PlotSpec | 
             ],
         )
 
-    if latent_name == "Inflammation":
+    if latent_name == "Inflammation" or rule_name in {"tag_inflammation", "tag_inflammation_sepsis"}:
         return make_or_spec(
             latent_name,
             [
@@ -530,7 +497,7 @@ def mimic_plot_spec(latent_name: str, thresholds: Dict[str, Any]) -> PlotSpec | 
             ],
         )
 
-    if latent_name == "Shock":
+    if latent_name == "Shock" or rule_name == "tag_shock":
         return make_or_spec(
             latent_name,
             [
@@ -543,7 +510,7 @@ def mimic_plot_spec(latent_name: str, thresholds: Dict[str, Any]) -> PlotSpec | 
             ],
         )
 
-    if latent_name == "RespFail":
+    if latent_name == "RespFail" or rule_name in {"tag_respfail", "tag_respiratory_failure"}:
         return make_nested_or_spec(
             latent_name,
             direct_conditions=[
@@ -563,7 +530,7 @@ def mimic_plot_spec(latent_name: str, thresholds: Dict[str, Any]) -> PlotSpec | 
             ],
         )
 
-    if latent_name == "RenalDysfunction":
+    if latent_name == "RenalDysfunction" or rule_name == "tag_renal_dysfunction":
         return make_or_spec(
             latent_name,
             [
@@ -575,7 +542,7 @@ def mimic_plot_spec(latent_name: str, thresholds: Dict[str, Any]) -> PlotSpec | 
             ],
         )
 
-    if latent_name == "HepaticDysfunction":
+    if latent_name == "HepaticDysfunction" or rule_name in {"tag_hepatic_dysfunction", "tag_hepatic_coag_dysfunction"}:
         return make_or_spec(
             latent_name,
             [
@@ -585,7 +552,7 @@ def mimic_plot_spec(latent_name: str, thresholds: Dict[str, Any]) -> PlotSpec | 
             ],
         )
 
-    if latent_name == "CoagDysfunction":
+    if latent_name == "CoagDysfunction" or rule_name == "tag_coag_dysfunction":
         return make_or_spec(
             latent_name,
             [
@@ -594,13 +561,13 @@ def mimic_plot_spec(latent_name: str, thresholds: Dict[str, Any]) -> PlotSpec | 
             ],
         )
 
-    if latent_name == "NeuroDysfunction":
+    if latent_name == "NeuroDysfunction" or rule_name in {"tag_neuro_dysfunction", "tag_neurologic_dysfunction"}:
         return make_single_rule_spec(
             latent_name,
             f"GCS_min < {format_value(thresholds['neuro_gcs'])}",
         )
 
-    if latent_name == "CardiacInjury":
+    if latent_name == "CardiacInjury" or rule_name in {"tag_cardiac_injury", "tag_cardiac_strain"}:
         return make_or_spec(
             latent_name,
             [
@@ -610,7 +577,7 @@ def mimic_plot_spec(latent_name: str, thresholds: Dict[str, Any]) -> PlotSpec | 
             ],
         )
 
-    if latent_name == "MetabolicDerangement":
+    if latent_name == "MetabolicDerangement" or rule_name == "tag_metabolic_derangement":
         return make_or_spec(
             latent_name,
             [
@@ -626,8 +593,345 @@ def mimic_plot_spec(latent_name: str, thresholds: Dict[str, Any]) -> PlotSpec | 
     return None
 
 
-def physionet_plot_spec(latent_name: str, thresholds: Dict[str, Any]) -> PlotSpec | None:
-    if latent_name == "Severity":
+def physionet_new_plot_spec(
+    latent_name: str,
+    rule_name: str,
+    thresholds: Dict[str, Any],
+) -> PlotSpec | None:
+    if rule_name == "tag_lat_chronic_baseline_risk":
+        return make_score_spec(
+            latent_name,
+            domain_boxes=[
+                f"Age risk\nAge_first or Age >= {format_value(thresholds['chronic_age'])}",
+                (
+                    "Body-size risk\n"
+                    f"BMI < {format_value(thresholds['chronic_bmi_low'])} OR\n"
+                    f"BMI >= {format_value(thresholds['chronic_bmi_high'])}"
+                ),
+                f"Low albumin\nAlbumin_min < {format_value(thresholds['chronic_albumin'])}",
+                "Case-mix risk\nICUType_first or ICUType in {1, 3}",
+            ],
+            score_label="score = sum(baseline vulnerability indicators)",
+            decision_label=f"score >= {format_value(thresholds['chronic_min_count'])}",
+        )
+
+    if rule_name == "tag_lat_global_severity":
+        return make_score_spec(
+            latent_name,
+            domain_boxes=[
+                (
+                    "Hemodynamic domain\n"
+                    f"MAP_min < {format_value(thresholds['global_map'])} OR\n"
+                    f"NIMAP_min < {format_value(thresholds['global_nimap'])} OR\n"
+                    f"SysABP_min <= {format_value(thresholds['global_sysabp'])} OR\n"
+                    f"NISysABP_min <= {format_value(thresholds['global_nisysabp'])}"
+                ),
+                (
+                    "Respiratory domain\n"
+                    "MechVent_max == 1 OR\n"
+                    f"PF_min < {format_value(thresholds['global_pf'])} OR\n"
+                    f"SaO2_min < {format_value(thresholds['global_sao2'])} OR\n"
+                    f"RespRate_max >= {format_value(thresholds['global_resprate'])}"
+                ),
+                f"Neurologic domain\nGCS_min < {format_value(thresholds['global_gcs'])}",
+                (
+                    "Renal domain\n"
+                    f"Creatinine_max >= {format_value(thresholds['global_creatinine'])} OR\n"
+                    f"BUN_max >= {format_value(thresholds['global_bun'])} OR\n"
+                    f"Urine_24h_min < {format_value(thresholds['global_urine_24h'])}"
+                ),
+                (
+                    "Hepatic/coag domain\n"
+                    f"Bilirubin_max >= {format_value(thresholds['global_bilirubin'])} OR\n"
+                    f"Platelets_min < {format_value(thresholds['global_platelets'])}"
+                ),
+                (
+                    "Metabolic domain\n"
+                    f"Lactate_max > {format_value(thresholds['global_lactate'])} OR\n"
+                    f"pH_min < {format_value(thresholds['global_ph'])} OR\n"
+                    f"HCO3_min < {format_value(thresholds['global_hco3'])}"
+                ),
+                (
+                    "Cardiac/stress domain\n"
+                    f"TropI_max > {format_value(thresholds['global_tropi'])} OR\n"
+                    f"TropT_max > {format_value(thresholds['global_tropt'])} OR\n"
+                    f"HR_max >= {format_value(thresholds['global_hr'])}"
+                ),
+            ],
+            score_label="score = sum(acute severity domains)",
+            decision_label=(
+                f"score >= {format_value(thresholds['global_min_count'])} OR\n"
+                "score >= 2 with a critical flag"
+            ),
+        )
+
+    if rule_name == "tag_lat_shock":
+        return make_score_spec(
+            latent_name,
+            domain_boxes=[
+                (
+                    "Low MAP\n"
+                    f"MAP_min < {format_value(thresholds['shock_map'])} OR\n"
+                    f"NIMAP_min < {format_value(thresholds['shock_nimap'])}"
+                ),
+                (
+                    "Low systolic pressure\n"
+                    f"SysABP_min <= {format_value(thresholds['shock_sysabp'])} OR\n"
+                    f"NISysABP_min <= {format_value(thresholds['shock_nisysabp'])}"
+                ),
+                f"Hypoperfusion\nLactate_max > {format_value(thresholds['shock_lactate'])}",
+                f"Tachycardia\nHR_max >= {format_value(thresholds['shock_hr'])}",
+                f"Oliguria\nUrine_24h_min < {format_value(thresholds['shock_urine_24h'])}",
+                (
+                    "Acidosis\n"
+                    f"pH_min < {format_value(thresholds['shock_ph'])} OR\n"
+                    f"HCO3_min < {format_value(thresholds['shock_hco3'])}"
+                ),
+            ],
+            score_label="score = sum(shock indicators)",
+            decision_label=(
+                f"score >= {format_value(thresholds['shock_min_count'])} OR\n"
+                f"low MAP with Lactate_max >= {format_value(thresholds['shock_critical_lactate'])}"
+            ),
+        )
+
+    if rule_name == "tag_lat_respiratory_failure":
+        return make_score_spec(
+            latent_name,
+            domain_boxes=[
+                "Ventilatory support\nMechVent_max == 1",
+                f"Oxygenation failure\nPF_min < {format_value(thresholds['resp_pf'])}",
+                (
+                    "Hypoxemia\n"
+                    f"SaO2_min < {format_value(thresholds['resp_sao2'])} OR\n"
+                    f"PaO2_min < {format_value(thresholds['resp_pao2'])}"
+                ),
+                (
+                    "Respiratory-rate abnormality\n"
+                    f"RespRate_max >= {format_value(thresholds['resp_rate_high'])} OR\n"
+                    f"RespRate_min < {format_value(thresholds['resp_rate_low'])}"
+                ),
+                (
+                    "Ventilatory failure\n"
+                    f"PaCO2_max >= {format_value(thresholds['resp_paco2'])} OR\n"
+                    f"PaCO2_max >= {format_value(thresholds['resp_paco2_acidotic'])} "
+                    f"AND pH_min < {format_value(thresholds['resp_ph'])}"
+                ),
+            ],
+            score_label="score = sum(respiratory indicators)",
+            decision_label=(
+                f"score >= {format_value(thresholds['resp_min_count'])} OR\n"
+                "MechVent_max == 1 with low PF"
+            ),
+        )
+
+    if rule_name == "tag_lat_renal_dysfunction":
+        return make_score_spec(
+            latent_name,
+            domain_boxes=[
+                f"Creatinine high\nCreatinine_max >= {format_value(thresholds['renal_creatinine'])}",
+                (
+                    "Creatinine rise\n"
+                    "Creatinine_max - Creatinine_first >= "
+                    f"{format_value(thresholds['renal_creatinine_rise'])}"
+                ),
+                f"Azotemia\nBUN_max >= {format_value(thresholds['renal_bun'])}",
+                f"Oliguria\nUrine_24h_min < {format_value(thresholds['renal_urine_24h'])}",
+                (
+                    "Renal metabolic consequence\n"
+                    f"K_max >= {format_value(thresholds['renal_k'])} OR\n"
+                    f"HCO3_min < {format_value(thresholds['renal_hco3'])}"
+                ),
+            ],
+            score_label="score = sum(renal indicators)",
+            decision_label=(
+                f"score >= {format_value(thresholds['renal_min_count'])} OR\n"
+                f"Creatinine_max >= {format_value(thresholds['renal_critical_creatinine'])}"
+            ),
+        )
+
+    if rule_name == "tag_lat_hepatic_dysfunction":
+        return make_score_spec(
+            latent_name,
+            domain_boxes=[
+                f"Bilirubin elevation\nBilirubin_max >= {format_value(thresholds['hepatic_bilirubin'])}\n(weight 2)",
+                (
+                    "Transaminase elevation\n"
+                    f"AST_max >= {format_value(thresholds['hepatic_ast'])} OR\n"
+                    f"ALT_max >= {format_value(thresholds['hepatic_alt'])}"
+                ),
+                f"Cholestasis\nALP_max >= {format_value(thresholds['hepatic_alp'])}",
+                f"Low albumin\nAlbumin_min < {format_value(thresholds['hepatic_albumin'])}",
+                f"Portal/severe marker\nPlatelets_min < {format_value(thresholds['hepatic_platelets'])}",
+            ],
+            score_label="score = 2*bilirubin + other hepatic indicators",
+            decision_label=f"score >= {format_value(thresholds['hepatic_min_count'])}",
+        )
+
+    if rule_name == "tag_lat_coag_heme_dysfunction":
+        return make_score_spec(
+            latent_name,
+            domain_boxes=[
+                (
+                    "Severe thrombocytopenia\n"
+                    f"Platelets_min < {format_value(thresholds['coag_platelets_severe'])}\n"
+                    "(weight 2)"
+                ),
+                f"Mild thrombocytopenia\nPlatelets_min < {format_value(thresholds['coag_platelets_mild'])}",
+                (
+                    "Hematocrit abnormality\n"
+                    f"HCT_min < {format_value(thresholds['coag_hct_low'])} OR\n"
+                    f"HCT_max > {format_value(thresholds['coag_hct_high'])}"
+                ),
+                (
+                    "WBC extreme\n"
+                    f"WBC_min < {format_value(thresholds['coag_wbc_low'])} OR\n"
+                    f"WBC_max > {format_value(thresholds['coag_wbc_high'])}"
+                ),
+                (
+                    "Platelet drop\n"
+                    "Platelets_first - Platelets_min >= "
+                    f"{format_value(thresholds['coag_platelet_drop'])}"
+                ),
+            ],
+            score_label="score = 2*severe platelets + other heme indicators",
+            decision_label=f"score >= {format_value(thresholds['coag_min_count'])}",
+        )
+
+    if rule_name == "tag_lat_inflammation_sepsis_burden":
+        return make_score_spec(
+            latent_name,
+            domain_boxes=[
+                (
+                    "Temperature abnormality\n"
+                    f"Temp_max > {format_value(thresholds['inflam_temp_high'])} OR\n"
+                    f"Temp_min < {format_value(thresholds['inflam_temp_low'])}"
+                ),
+                (
+                    "WBC abnormality\n"
+                    f"WBC_max > {format_value(thresholds['inflam_wbc_high'])} OR\n"
+                    f"WBC_min < {format_value(thresholds['inflam_wbc_low'])}"
+                ),
+                f"Tachycardia\nHR_max > {format_value(thresholds['inflam_hr'])}",
+                (
+                    "Respiratory stress\n"
+                    f"RespRate_max > {format_value(thresholds['inflam_resprate'])} OR\n"
+                    f"PaCO2_min < {format_value(thresholds['inflam_paco2'])}"
+                ),
+                f"Lactate stress\nLactate_max > {format_value(thresholds['inflam_lactate'])}",
+                f"Platelets low\nPlatelets_min < {format_value(thresholds['inflam_platelets'])}",
+            ],
+            score_label="score = sum(inflammatory indicators)",
+            decision_label=(
+                f"score >= {format_value(thresholds['inflam_min_count'])} OR\n"
+                "(temp OR WBC) with lactate stress and score >= 2"
+            ),
+        )
+
+    if rule_name == "tag_lat_neurologic_dysfunction":
+        return make_score_spec(
+            latent_name,
+            domain_boxes=[
+                f"Mild GCS abnormality\nGCS_min < {format_value(thresholds['neuro_gcs_mild'])}",
+                f"Severe GCS abnormality\nGCS_min <= {format_value(thresholds['neuro_gcs_severe'])}\n(weight 2)",
+                (
+                    "Metabolic neurologic stress\n"
+                    f"Na_min < {format_value(thresholds['neuro_na_low'])} OR\n"
+                    f"Na_max > {format_value(thresholds['neuro_na_high'])} OR\n"
+                    f"Glucose_min < {format_value(thresholds['neuro_glucose_low'])} OR\n"
+                    f"Glucose_max > {format_value(thresholds['neuro_glucose_high'])}"
+                ),
+                (
+                    "Gas-exchange neurologic stress\n"
+                    f"PaCO2_max >= {format_value(thresholds['neuro_paco2'])} OR\n"
+                    f"SaO2_min < {format_value(thresholds['neuro_sao2'])} OR\n"
+                    f"pH_min < {format_value(thresholds['neuro_ph'])}"
+                ),
+            ],
+            score_label="score = 2*severe GCS + other neurologic indicators",
+            decision_label=f"score >= {format_value(thresholds['neuro_min_count'])}",
+        )
+
+    if rule_name == "tag_lat_cardiac_injury_strain":
+        return make_score_spec(
+            latent_name,
+            domain_boxes=[
+                (
+                    "Troponin abnormality\n"
+                    f"TropI_max > {format_value(thresholds['card_tropi'])} OR\n"
+                    f"TropT_max > {format_value(thresholds['card_tropt'])}\n"
+                    "(weight 2)"
+                ),
+                "Cardiac unit context\nICUType_first or ICUType in {1, 2}",
+                (
+                    "Arrhythmic stress\n"
+                    f"HR_max >= {format_value(thresholds['card_hr_high'])} OR\n"
+                    f"HR_min < {format_value(thresholds['card_hr_low'])}"
+                ),
+                (
+                    "Hemodynamic strain\n"
+                    f"MAP_min < {format_value(thresholds['card_map'])} OR\n"
+                    f"SysABP_min <= {format_value(thresholds['card_sysabp'])}"
+                ),
+                f"Perfusion stress\nLactate_max > {format_value(thresholds['card_lactate'])}",
+            ],
+            score_label="score = 2*troponin + cardiac strain indicators",
+            decision_label=f"score >= {format_value(thresholds['card_min_count'])}",
+        )
+
+    if rule_name == "tag_lat_metabolic_derangement":
+        return make_score_spec(
+            latent_name,
+            domain_boxes=[
+                (
+                    "pH abnormality\n"
+                    f"pH_min < {format_value(thresholds['metab_ph_low'])} OR\n"
+                    f"pH_max > {format_value(thresholds['metab_ph_high'])}"
+                ),
+                (
+                    "Bicarbonate abnormality\n"
+                    f"HCO3_min < {format_value(thresholds['metab_hco3_low'])} OR\n"
+                    f"HCO3_max > {format_value(thresholds['metab_hco3_high'])}"
+                ),
+                f"Lactate abnormality\nLactate_max > {format_value(thresholds['metab_lactate'])}",
+                (
+                    "Electrolyte abnormality\n"
+                    f"Na outside [{format_value(thresholds['metab_na_low'])}, "
+                    f"{format_value(thresholds['metab_na_high'])}] OR\n"
+                    f"K outside [{format_value(thresholds['metab_k_low'])}, "
+                    f"{format_value(thresholds['metab_k_high'])}] OR\n"
+                    f"Mg outside [{format_value(thresholds['metab_mg_low'])}, "
+                    f"{format_value(thresholds['metab_mg_high'])}]"
+                ),
+                (
+                    "Glucose abnormality\n"
+                    f"Glucose outside [{format_value(thresholds['metab_glucose_low'])}, "
+                    f"{format_value(thresholds['metab_glucose_high'])}]"
+                ),
+                (
+                    "Ventilatory compensation abnormality\n"
+                    f"PaCO2 outside [{format_value(thresholds['metab_paco2_low'])}, "
+                    f"{format_value(thresholds['metab_paco2_high'])}]"
+                ),
+            ],
+            score_label="score = sum(metabolic indicators)",
+            decision_label=(
+                f"score >= {format_value(thresholds['metab_min_count'])} OR\n"
+                f"pH < {format_value(thresholds['metab_critical_ph'])} OR "
+                f"Lactate >= {format_value(thresholds['metab_critical_lactate'])} OR "
+                f"K >= {format_value(thresholds['metab_critical_k'])}"
+            ),
+        )
+
+    return None
+
+
+def physionet_plot_spec(latent_name: str, rule_name: str, thresholds: Dict[str, Any]) -> PlotSpec | None:
+    new_spec = physionet_new_plot_spec(latent_name, rule_name, thresholds)
+    if new_spec is not None:
+        return new_spec
+
+    if latent_name == "Severity" or rule_name == "tag_severity":
         return make_score_spec(
             latent_name,
             domain_boxes=[
@@ -654,7 +958,7 @@ def physionet_plot_spec(latent_name: str, thresholds: Dict[str, Any]) -> PlotSpe
             decision_label=f"score >= {format_value(thresholds['severity_min_count'])}",
         )
 
-    if latent_name == "Shock":
+    if latent_name == "Shock" or rule_name == "tag_shock":
         return make_or_spec(
             latent_name,
             [
@@ -665,7 +969,7 @@ def physionet_plot_spec(latent_name: str, thresholds: Dict[str, Any]) -> PlotSpe
             ],
         )
 
-    if latent_name == "RespFail":
+    if latent_name == "RespFail" or rule_name == "tag_respfail":
         return make_or_spec(
             latent_name,
             [
@@ -675,7 +979,7 @@ def physionet_plot_spec(latent_name: str, thresholds: Dict[str, Any]) -> PlotSpe
             ],
         )
 
-    if latent_name == "RenalFail":
+    if latent_name == "RenalFail" or rule_name == "tag_renalfail":
         return make_or_spec(
             latent_name,
             [
@@ -685,7 +989,7 @@ def physionet_plot_spec(latent_name: str, thresholds: Dict[str, Any]) -> PlotSpe
             ],
         )
 
-    if latent_name == "HepFail":
+    if latent_name == "HepFail" or rule_name == "tag_hepfail":
         return make_or_spec(
             latent_name,
             [
@@ -695,7 +999,7 @@ def physionet_plot_spec(latent_name: str, thresholds: Dict[str, Any]) -> PlotSpe
             ],
         )
 
-    if latent_name == "HemeFail":
+    if latent_name == "HemeFail" or rule_name == "tag_hemefail":
         return make_or_spec(
             latent_name,
             [
@@ -704,7 +1008,7 @@ def physionet_plot_spec(latent_name: str, thresholds: Dict[str, Any]) -> PlotSpe
             ],
         )
 
-    if latent_name == "Inflam":
+    if latent_name == "Inflam" or rule_name == "tag_inflam":
         return make_or_spec(
             latent_name,
             [
@@ -715,13 +1019,13 @@ def physionet_plot_spec(latent_name: str, thresholds: Dict[str, Any]) -> PlotSpe
             ],
         )
 
-    if latent_name == "NeuroFail":
+    if latent_name == "NeuroFail" or rule_name == "tag_neurofail":
         return make_single_rule_spec(
             latent_name,
             f"GCS_min < {format_value(thresholds['neuro_gcs'])}",
         )
 
-    if latent_name == "CardInj":
+    if latent_name == "CardInj" or rule_name == "tag_cardinj":
         return make_or_spec(
             latent_name,
             [
@@ -730,7 +1034,7 @@ def physionet_plot_spec(latent_name: str, thresholds: Dict[str, Any]) -> PlotSpe
             ],
         )
 
-    if latent_name == "Metab":
+    if latent_name == "Metab" or rule_name == "tag_metab":
         return make_or_spec(
             latent_name,
             [
@@ -742,7 +1046,7 @@ def physionet_plot_spec(latent_name: str, thresholds: Dict[str, Any]) -> PlotSpe
             ],
         )
 
-    if latent_name == "ChronicRisk":
+    if latent_name == "ChronicRisk" or rule_name == "tag_chronicrisk":
         return make_or_spec(
             latent_name,
             [
@@ -751,7 +1055,7 @@ def physionet_plot_spec(latent_name: str, thresholds: Dict[str, Any]) -> PlotSpe
             ],
         )
 
-    if latent_name == "AcuteInsult":
+    if latent_name == "AcuteInsult" or rule_name == "tag_acuteinsult":
         return make_or_spec(
             latent_name,
             [
@@ -770,12 +1074,20 @@ SPEC_BUILDERS = {
 }
 
 
-def build_plot_spec(dataset: str, latent_name: str, obj: Any) -> PlotSpec:
+def build_plot_spec(dataset: str, latent_name: str, obj: Any) -> tuple[PlotSpec, bool]:
+    rule_name = get_callable_rule_name(obj)
     thresholds = extract_thresholds(dataset, obj)
-    explicit_spec = SPEC_BUILDERS[dataset](latent_name, thresholds)
+    try:
+        explicit_spec = SPEC_BUILDERS[dataset](latent_name, rule_name, thresholds)
+    except KeyError as exc:
+        missing_key = exc.args[0]
+        fail(
+            "missing threshold while building explicit plot spec "
+            f"for latent {latent_name!r}, callable rule {rule_name!r}: {missing_key!r}"
+        )
     if explicit_spec is not None:
-        return explicit_spec
-    return make_fallback_spec(latent_name, describe_callable(obj))
+        return explicit_spec, True
+    return make_fallback_spec(latent_name, rule_name, describe_callable(obj)), False
 
 
 # ---------------------------------------------------------------------------
@@ -956,7 +1268,7 @@ def save_plot(spec: PlotSpec, output_path: Path, dpi: int, fig_width: float | No
 # ---------------------------------------------------------------------------
 
 def select_latents(payload: Dict[str, Any], requested_latents: Iterable[str] | None) -> List[str]:
-    available_latents = list(payload.keys())
+    available_latents = get_latent_names_from_payload(payload)
     if requested_latents is None:
         return available_latents
 
@@ -984,15 +1296,12 @@ def ensure_output_paths(latents: Sequence[str], dataset: str, output_dir: Path, 
 def main() -> None:
     args = parse_args()
     validate_args(args)
-    config = load_dataset_config(args.dataset, args.dataset_config_csv)
-    configured_latents = get_config_list(config, "LATENT_ORDER", None)
-    if configured_latents:
-        KNOWN_LATENTS[args.dataset] = set(str(latent) for latent in configured_latents)
 
     pickle_path = Path(args.pickle_path).resolve()
     output_dir = Path(args.output_dir).resolve()
 
     payload = load_pickle_dict(pickle_path)
+    all_latents = get_latent_names_from_payload(payload)
     selected_latents = select_latents(payload, args.only)
     output_paths = ensure_output_paths(
         latents=selected_latents,
@@ -1003,12 +1312,19 @@ def main() -> None:
     )
 
     explicit_count = 0
+    fallback_count = 0
     saved_paths: List[Path] = []
 
     for latent_name, output_path in zip(selected_latents, output_paths):
-        plot_spec = build_plot_spec(args.dataset, latent_name, payload[latent_name])
-        if latent_name in KNOWN_LATENTS[args.dataset]:
+        plot_spec, used_explicit_spec = build_plot_spec(
+            args.dataset,
+            latent_name,
+            payload[latent_name],
+        )
+        if used_explicit_spec:
             explicit_count += 1
+        else:
+            fallback_count += 1
         save_plot(
             spec=plot_spec,
             output_path=output_path,
@@ -1019,7 +1335,10 @@ def main() -> None:
         saved_paths.append(output_path)
 
     print(f"Loaded {len(payload)} latent callables from: {pickle_path}")
-    print(f"Selected latents ({len(selected_latents)}): {', '.join(selected_latents)}")
+    print(f"Latent names found in pickle ({len(all_latents)}): {', '.join(all_latents)}")
+    print(f"Selected latent names ({len(selected_latents)}): {', '.join(selected_latents)}")
+    print(f"Selected latents using explicit plotting specs: {explicit_count}")
+    print(f"Selected latents using fallback plots: {fallback_count}")
     if explicit_count == 0:
         print(
             "Warning: none of the selected latent names matched an explicit plotting spec; "

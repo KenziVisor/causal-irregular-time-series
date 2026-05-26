@@ -284,6 +284,12 @@ Known issue:
 - Uses the run-level `global_summary.csv` as the source of truth for `mean_cate` and `mean_normalized_cate` and only falls back to another `*global_summary*.csv` if the required columns are missing.
 - Keeps only final aggregate CSV outputs and removes per-trial temporary latent CSVs, shuffled pickles, and trial output directories right after metric extraction.
 
+### `src/decision_trees_plot.py`
+
+- Renders one figure per latent rule from latent decision-tree pickles, using pickle keys as the authoritative latent names.
+- Supports old plain-function pickles and newer `functools.partial(..., thr={...})` pickles; explicit plot selection is based on callable rule names such as `tag_lat_global_severity`, while figure titles and filenames keep the pickle key.
+- Unknown rule names should fall back to a generic callable figure instead of failing.
+
 ## Shared DAG / Confounder Logic In `matching_causal_effect.py` And `cate_estimation.py`
 
 Both scripts implement essentially the same graph logic:
