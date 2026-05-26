@@ -34,7 +34,8 @@ Current compact field contract
 - LATENT_ORDER: JSON list defining expected latent-state order.
 - BACKGROUND_FEATURE_COLUMNS: JSON list of baseline covariates loaded from `ts`.
 - EFFECT_MODIFIER_COLUMNS: JSON list of CATE effect modifier columns.
-- MODEL_TYPE: estimator family such as `CausalForest` or `LinearDML`.
+- MODEL_TYPE: estimator family such as `CausalForest`, `LinearDML`, or
+  `CausalPFN`.
 - TRIALS: integer number of permutation trials used by `main.py` and
   `src/permutations_test.py`.
 - DOWN_SAMPLE: whether supported estimators down-sample the majority outcome

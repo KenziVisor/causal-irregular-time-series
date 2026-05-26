@@ -9,7 +9,7 @@ from typing import Any
 
 
 DATASET_CHOICES = {"physionet", "mimic"}
-MODEL_TYPE_CHOICES = {"CausalForest", "LinearDML"}
+MODEL_TYPE_CHOICES = {"CausalForest", "LinearDML", "CausalPFN"}
 
 COMPACT_CONFIG_FIELDS = [
     "PREFERRED_ENV_NAME",

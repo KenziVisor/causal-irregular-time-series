@@ -36,7 +36,7 @@ This is script-first research code, not a package:
 - `src/preprocess_mimic_iii_large.py`: raw MIMIC-III ICU data -> processed pickle. Final exported artifact is now PhysioNet-compatible `[ts, oc, ts_ids]`; internal `TABLE`, `HADM_ID`, `SUBJECT_ID`, and legacy split arrays are not part of the main pickle.
 - `src/preprocess_mimic_iii_large_contract.py`: pure compatibility helpers for canonicalizing MIMIC exports into PhysioNet-style `ts`, `oc`, and `ts_ids`, plus strict schema validation.
 - `src/dataset_config.py`: import-safe CSV loader for dataset-global defaults; it does not import project scripts.
-- `main.py`: top-level post-preprocessing orchestrator. Uses subprocesses only, writes one subdirectory per stage plus `logs/` and `run_summary.json`, and expects preprocessing to be complete before it runs.
+- `main.py`: top-level post-preprocessing orchestrator. Uses subprocesses only, writes one subdirectory per stage plus `logs/` and `run_summary.json`, and expects preprocessing to be complete before it runs. `--model-type` can override config `MODEL_TYPE`; when it is `CausalPFN`, the orchestrator runs CATE but marks saved-model analysis and permutations as skipped.
 - `src/tagging_latent_variables_mimiciii.py`: rule-based MIMIC latent tagger. Supports summary CSV, raw concept CSVs, and canonical `[ts, oc, ts_ids]` pickle input; pickle mode reconstructs only the rule-needed summary fields from canonical `ts`/`oc`, with key aliases such as `MBP -> MAP`, `PCO2 -> PaCO2`, `PO2 -> PaO2`, `O2 Saturation -> SpO2`, `Creatinine Blood -> Creatinine`, and `Bilirubin (Total) -> Bilirubin`, and computes `GCS_min` from `GCS_eye`, `GCS_motor`, `GCS_verbal`.
 - `src/physionet2012_causal_graph.py`: builds the PhysioNet DAG and now supports explicit graph pickle / PNG output paths via CLI.
 - `src/tagging_latent_variables.py`: older summary-statistics latent tagger. Auto-runs on import.
@@ -44,7 +44,7 @@ This is script-first research code, not a package:
 - `src/optimize_latent_thresholds.py`: Optuna threshold search for the older tagger only. Guarded.
 - `src/mortality_prediction_using_latents.py`: mortality prediction from latent tags using Logistic Regression and a small PyTorch MLP. Guarded by `if __name__ == "__main__":`.
 - `src/matching_causal_effect.py`: DAG-guided confounder selection + greedy Hamming matching baseline. Guarded.
-- `src/cate_estimation.py`: DAG-guided confounder selection + EconML `CausalForestDML` / `LinearDML`. Guarded. This is the current main causal script.
+- `src/cate_estimation.py`: DAG-guided confounder selection + `CausalForestDML` / `LinearDML` / `CausalPFN` CATE estimation. Guarded. This is the current main causal script.
 - `src/permutations_test.py`: permutation-test orchestration wrapper around `cate_estimation.py`. Calls it via subprocess, reads run-level summary CSVs, keeps only aggregated metrics, and deletes per-trial temp inputs / output dirs immediately.
 - `src/draft/`: older stratification-based ATE/CATE experiments plus a treatment-splitting helper.
 - `src/run_*`: archived `cate_estimation.py` outputs from past runs.
@@ -231,7 +231,7 @@ Known issue:
 ### `src/cate_estimation.py`
 
 - Defaults to `../../data/latent_tags_clinical.csv`.
-- Supports `CausalForestDML` and `LinearDML` via `--model-type`.
+- Supports `CausalForestDML`, `LinearDML`, and `CausalPFN` via `--model-type`.
 - CLI flags:
   - `--latent-tags-path`
   - `--dataset-pkl-path` (`--physionet-pkl-path` is a deprecated alias)
@@ -252,6 +252,7 @@ Known issue:
 - Missing confounders / modifiers are median-imputed instead of dropping rows.
 - Current code allows overlap between `W` (confounders) and `X` (effect modifiers).
 - The fit call now passes `cache_values=True`, and saved artifacts include `cache_values_used`, estimator class, exact confounder / effect-modifier order, and a `direct_diagnostics` block for easy post-hoc reuse.
+- The CausalPFN backend uses a deduplicated feature matrix from `confounders + effect_modifiers` instead of EconML `W`/`X`, skips confidence intervals and EconML sensitivity diagnostics for now, and saves `estimator=None` plus CausalPFN metadata instead of pickling the pretrained torch model.
 - Default output dir is now `../../data/relevant_outputs/cate_outputs_predicted_230326` when the script is run from `src/`, which aligns it with `analyze_cate_results.py`.
 - Writes per treatment:
   - `confounder_analysis.txt`

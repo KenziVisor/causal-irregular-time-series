@@ -74,7 +74,8 @@ OUTPUT_DIR = "../../data/relevant_outputs/cate_outputs_predicted_230326"
 SEED = 42
 DOWN_SAMPLE = False
 USE_EXPANDED_SAFE_CONFOUNDERS = True
-MODEL_TYPE = "CausalForest"   # LinearDML or CausalForest
+MODEL_TYPE = "CausalForest"   # LinearDML, CausalForest, or CausalPFN
+MODEL_TYPE_CHOICES = ["LinearDML", "CausalForest", "CausalPFN"]
 DEFAULT_SENSITIVITY_ALPHA = 0.05
 ARTIFACT_SCHEMA_VERSION = 3
 ESTIMATOR_STACK_DEVICE_NOTE = (
@@ -167,7 +168,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model-type",
-        choices=["LinearDML", "CausalForest"],
+        choices=MODEL_TYPE_CHOICES,
         default=None,
         help=f"Estimator family to use. Default: {MODEL_TYPE}",
     )
@@ -1478,6 +1479,8 @@ def make_dml_estimator():
     Supported values:
       - "CausalForest"
       - "LinearDML"
+    CausalPFN is handled in fit_one_treatment because it does not use the
+    EconML W/X interface.
     """
     if MODEL_TYPE == "CausalForest":
         return CausalForestDML(
@@ -1523,7 +1526,7 @@ def make_dml_estimator():
 
     raise ValueError(
         f"Unsupported MODEL_TYPE: {MODEL_TYPE}. "
-        "Use 'CausalForest' or 'LinearDML'."
+        f"Use one of {MODEL_TYPE_CHOICES}."
     )
 
 
@@ -1866,6 +1869,55 @@ def collect_direct_diagnostics(
     return diagnostics
 
 
+def unavailable_estimator_method_availability() -> Dict[str, bool]:
+    return {
+        "has_method_robustness_value": False,
+        "has_method_sensitivity_interval": False,
+        "has_method_sensitivity_summary": False,
+        "has_method_summary": False,
+        "has_attr_residuals": False,
+    }
+
+
+def build_unavailable_direct_diagnostics(reason: str) -> Dict[str, object]:
+    source = "not_applicable_for_causalpfn"
+    diagnostics: Dict[str, object] = unavailable_estimator_method_availability()
+
+    for artifact_key, legacy_key in [
+        ("saved_direct_rv", "direct_robustness_value"),
+        ("saved_direct_sensitivity_interval", "direct_sensitivity_interval"),
+        ("saved_direct_sensitivity_summary", "direct_sensitivity_summary"),
+    ]:
+        diagnostics[artifact_key] = None
+        diagnostics[f"{artifact_key}_source"] = source
+        diagnostics[f"{artifact_key}_error"] = reason
+        diagnostics[legacy_key] = None
+        diagnostics[f"{legacy_key}_source"] = source
+        diagnostics[f"{legacy_key}_error"] = reason
+
+    diagnostics["direct_residuals_available"] = False
+    diagnostics["direct_residuals_tuple_length"] = None
+    diagnostics["direct_residuals_error"] = reason
+    diagnostics["saved_training_residuals_available"] = False
+    diagnostics["saved_training_residuals_source"] = source
+    diagnostics["saved_training_residuals_error"] = reason
+    diagnostics["saved_training_residuals_tuple_length"] = None
+
+    diagnostics["saved_direct_estimator_summary_text"] = None
+    diagnostics["saved_direct_estimator_summary_source"] = source
+    diagnostics["saved_direct_estimator_summary_error"] = reason
+    diagnostics["direct_estimator_summary_text"] = None
+    diagnostics["direct_estimator_summary_source"] = source
+    diagnostics["direct_estimator_summary_error"] = reason
+
+    diagnostics["saved_sensitivity_params_available"] = False
+    diagnostics["saved_sensitivity_params_source"] = source
+    diagnostics["saved_sensitivity_params_error"] = reason
+    diagnostics["saved_sensitivity_params_serialized"] = None
+
+    return diagnostics
+
+
 def fit_one_treatment(
     df: pd.DataFrame,
     treatment: str,
@@ -1923,6 +1975,7 @@ def fit_one_treatment(
         f"[{treatment}] selected variables: confounders={len(confounders)} | "
         f"effect_modifiers={len(effect_modifiers)}"
     )
+    print(f"[{treatment}] selected model type: {MODEL_TYPE}")
 
     used_cols = ["ts_id", treatment, OUTCOME_COL] + confounders + effect_modifiers
     used_cols = list(dict.fromkeys(used_cols))
@@ -1964,25 +2017,95 @@ def fit_one_treatment(
     W = model_df[confounders].astype(float).to_numpy() if confounders else None
     X = model_df[effect_modifiers].astype(float).to_numpy() if effect_modifiers else None
 
-    est = make_dml_estimator()
-    pre_fit_availability = collect_estimator_method_availability(est)
-    print(
-        f"[{treatment}] estimator method availability before fit: "
-        f"{format_estimator_method_availability(pre_fit_availability)}"
-    )
-    print(
-        f"[{treatment}] Starting estimator fit | n={len(model_df):,} | "
-        f"W_shape={None if W is None else W.shape} | X_shape={None if X is None else X.shape}"
-    )
+    causalpfn_metadata: Dict[str, object] = {}
+    cache_values_used = True
+    estimator_pickle_skipped = False
+    estimator_pickle_skip_reason = None
+    artifact_estimator = None
 
-    est.fit(Y=Y, T=T, X=X, W=W, cache_values=True)
-    post_fit_availability = collect_estimator_method_availability(est)
-    print(
-        f"[{treatment}] estimator method availability after fit: "
-        f"{format_estimator_method_availability(post_fit_availability)}"
-    )
-    cate = est.effect(X=X)
-    print(f"[{treatment}] Generated CATE estimates for {len(cate):,} rows")
+    if MODEL_TYPE == "CausalPFN":
+        from causalpfn import CATEEstimator
+        import torch
+
+        causalpfn_feature_columns = list(dict.fromkeys(confounders + effect_modifiers))
+        if not causalpfn_feature_columns:
+            constant_col = "__causalpfn_constant__"
+            model_df[constant_col] = 1.0
+            causalpfn_feature_columns = [constant_col]
+
+        X_causalpfn = (
+            model_df[causalpfn_feature_columns]
+            .astype(float)
+            .to_numpy(dtype=np.float32)
+        )
+        T_float = model_df[treatment].astype(np.float32).to_numpy()
+        Y_float = model_df[OUTCOME_COL].astype(np.float32).to_numpy()
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        print(f"[{treatment}] CausalPFN feature count: {len(causalpfn_feature_columns)}")
+        print(f"[{treatment}] CausalPFN device: {device}")
+
+        est = CATEEstimator(device=device, verbose=True)
+        pre_fit_availability = unavailable_estimator_method_availability()
+        print(
+            f"[{treatment}] estimator method availability before fit: "
+            f"{format_estimator_method_availability(pre_fit_availability)}"
+        )
+        print(
+            f"[{treatment}] Starting CausalPFN fit | n={len(model_df):,} | "
+            f"X_shape={X_causalpfn.shape}"
+        )
+        est.fit(X=X_causalpfn, t=T_float, y=Y_float)
+        print(f"[{treatment}] Finished CausalPFN fit")
+
+        raw_cate = est.estimate_cate(X_causalpfn)
+        if hasattr(raw_cate, "detach"):
+            raw_cate = raw_cate.detach().cpu().numpy()
+        cate = np.asarray(raw_cate, dtype=float).reshape(-1)
+        if len(cate) != len(model_df):
+            raise ValueError(
+                f"CausalPFN returned {len(cate)} CATE values for "
+                f"{len(model_df)} input rows"
+            )
+        print(f"[{treatment}] Generated CausalPFN CATE estimates for {len(cate):,} rows")
+
+        post_fit_availability = unavailable_estimator_method_availability()
+        cache_values_used = False
+        estimator_pickle_skipped = True
+        estimator_pickle_skip_reason = (
+            "CausalPFN uses a pretrained torch model; CATE CSV and metadata are "
+            "the primary saved outputs."
+        )
+        artifact_estimator = None
+        causalpfn_metadata = {
+            "causalpfn_feature_columns": causalpfn_feature_columns,
+            "causalpfn_feature_fill_values": {
+                col: float(fill_values.get(col, 1.0 if col == "__causalpfn_constant__" else 0.0))
+                for col in causalpfn_feature_columns
+            },
+            "causalpfn_device": device,
+        }
+    else:
+        est = make_dml_estimator()
+        pre_fit_availability = collect_estimator_method_availability(est)
+        print(
+            f"[{treatment}] estimator method availability before fit: "
+            f"{format_estimator_method_availability(pre_fit_availability)}"
+        )
+        print(
+            f"[{treatment}] Starting estimator fit | n={len(model_df):,} | "
+            f"W_shape={None if W is None else W.shape} | X_shape={None if X is None else X.shape}"
+        )
+
+        est.fit(Y=Y, T=T, X=X, W=W, cache_values=True)
+        post_fit_availability = collect_estimator_method_availability(est)
+        print(
+            f"[{treatment}] estimator method availability after fit: "
+            f"{format_estimator_method_availability(post_fit_availability)}"
+        )
+        cate = est.effect(X=X)
+        print(f"[{treatment}] Generated CATE estimates for {len(cate):,} rows")
+        artifact_estimator = est
 
     out = model_df[["ts_id", treatment, OUTCOME_COL]].copy()
     out["CATE"] = cate
@@ -1995,23 +2118,36 @@ def fit_one_treatment(
     else:
         out["normalized_CATE"] = np.nan
 
-    try:
-        lb, ub = est.effect_interval(X=X, alpha=0.05)
-        out["CATE_lower_95"] = lb
-        out["CATE_upper_95"] = ub
-
-        if target_rate > 0:
-            out["normalized_CATE_lower_95"] = out["CATE_lower_95"] / target_rate
-            out["normalized_CATE_upper_95"] = out["CATE_upper_95"] / target_rate
-        else:
-            out["normalized_CATE_lower_95"] = np.nan
-            out["normalized_CATE_upper_95"] = np.nan
-
-    except Exception:
+    if MODEL_TYPE == "CausalPFN":
         out["CATE_lower_95"] = np.nan
         out["CATE_upper_95"] = np.nan
         out["normalized_CATE_lower_95"] = np.nan
         out["normalized_CATE_upper_95"] = np.nan
+    else:
+        try:
+            lb, ub = est.effect_interval(X=X, alpha=0.05)
+            out["CATE_lower_95"] = lb
+            out["CATE_upper_95"] = ub
+
+            if target_rate > 0:
+                out["normalized_CATE_lower_95"] = out["CATE_lower_95"] / target_rate
+                out["normalized_CATE_upper_95"] = out["CATE_upper_95"] / target_rate
+            else:
+                out["normalized_CATE_lower_95"] = np.nan
+                out["normalized_CATE_upper_95"] = np.nan
+
+        except Exception:
+            out["CATE_lower_95"] = np.nan
+            out["CATE_upper_95"] = np.nan
+            out["normalized_CATE_lower_95"] = np.nan
+            out["normalized_CATE_upper_95"] = np.nan
+
+    causalpfn_formula_line = ""
+    if MODEL_TYPE == "CausalPFN":
+        causalpfn_formula_line = (
+            "\nCausalPFN X (deduped confounders + effect modifiers) = "
+            f"{causalpfn_metadata['causalpfn_feature_columns']}"
+        )
 
     formula = (
         f"Model = {MODEL_TYPE}\n"
@@ -2019,7 +2155,8 @@ def fit_one_treatment(
         f"T = {treatment}\n"
         f"Y = {OUTCOME_COL}\n"
         f"W (backdoor confounders) = {confounders if confounders else 'None'}\n"
-        f"X (effect modifiers) = {effect_modifiers if effect_modifiers else 'None'}\n"
+        f"X (effect modifiers) = {effect_modifiers if effect_modifiers else 'None'}"
+        f"{causalpfn_formula_line}\n"
         f"Normalized CATE = CATE / outcome_rate"
     )
 
@@ -2042,10 +2179,15 @@ def fit_one_treatment(
         "max_normalized_cate": float(out["normalized_CATE"].max()) if out["normalized_CATE"].notna().any() else np.nan,
     }
 
-    direct_diagnostics = collect_direct_diagnostics(
-        est=est,
-        effect_modifiers=effect_modifiers,
-    )
+    if MODEL_TYPE == "CausalPFN":
+        direct_diagnostics = build_unavailable_direct_diagnostics(
+            "CausalPFN does not expose EconML sensitivity diagnostics or residuals."
+        )
+    else:
+        direct_diagnostics = collect_direct_diagnostics(
+            est=est,
+            effect_modifiers=effect_modifiers,
+        )
     print(
         f"[{treatment}] direct sensitivity extraction sources: "
         f"rv={direct_diagnostics['saved_direct_rv_source']}, "
@@ -2073,9 +2215,18 @@ def fit_one_treatment(
         )
 
     env_metadata = collect_environment_metadata(runtime_device_info=runtime_device_info)
+    if MODEL_TYPE == "CausalPFN":
+        env_metadata["runtime_device_selected"] = causalpfn_metadata.get(
+            "causalpfn_device"
+        )
+        env_metadata["runtime_device_note"] = (
+            "CausalPFN selected "
+            f"{causalpfn_metadata.get('causalpfn_device')} based on "
+            "torch.cuda.is_available()."
+        )
 
     model_artifact = {
-        "estimator": est,
+        "estimator": artifact_estimator,
         "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
         **env_metadata,
         "estimator_module": type(est).__module__,
@@ -2084,8 +2235,10 @@ def fit_one_treatment(
         "outcome_col": OUTCOME_COL,
         "confounders": confounders,
         "effect_modifiers": effect_modifiers,
-        "cache_values_used": True,
+        "cache_values_used": cache_values_used,
         "estimator_class": type(est).__name__,
+        "estimator_pickle_skipped": estimator_pickle_skipped,
+        "estimator_pickle_skip_reason": estimator_pickle_skip_reason,
         "has_method_robustness_value": post_fit_availability["has_method_robustness_value"],
         "has_method_sensitivity_interval": post_fit_availability["has_method_sensitivity_interval"],
         "has_method_sensitivity_summary": post_fit_availability["has_method_sensitivity_summary"],
@@ -2153,6 +2306,7 @@ def fit_one_treatment(
             "saved_training_residuals_tuple_length"
         ],
         "direct_diagnostics": direct_diagnostics,
+        **causalpfn_metadata,
     }
 
     return est, out, summary, formula, model_artifact
@@ -2466,6 +2620,10 @@ def main():
     MODEL_TYPE = str(
         resolve_with_precedence(args.model_type, config, "MODEL_TYPE", MODEL_TYPE)
     )
+    if MODEL_TYPE not in MODEL_TYPE_CHOICES:
+        raise ValueError(
+            f"Unsupported MODEL_TYPE: {MODEL_TYPE}. Use one of {MODEL_TYPE_CHOICES}."
+        )
 
     warnings.filterwarnings("ignore", category=FutureWarning)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -2619,6 +2777,8 @@ def main():
                         coef_df.to_csv(feature_importance_csv, index=False)
                 except Exception:
                     pass
+            elif MODEL_TYPE == "CausalPFN":
+                print(f"[{treatment}] Skipping feature importance for CausalPFN")
 
             print(f"[{treatment}] Writing per-treatment outputs")
             cate_df.to_csv(cate_csv, index=False)

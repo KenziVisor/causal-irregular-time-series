@@ -7,9 +7,9 @@ Run examples from the repository root unless the entry says otherwise. Project P
 ### `main.py`
 
 - Purpose: Top-level post-preprocessing orchestrator for graph build, majority-vote latents, mortality, matching, CATE, saved-model analysis, and permutations.
-- Inputs: `--dataset`, `--dataset-config-csv`, latent-tag voter CSV directory, and processed `[ts, oc, ts_ids]` pickle.
+- Inputs: `--dataset`, `--dataset-config-csv`, latent-tag voter CSV directory, processed `[ts, oc, ts_ids]` pickle, and optional `--model-type`.
 - Outputs: Stage subdirectories, `logs/`, and `run_summary.json` under `--output-dir`.
-- Example: `conda run -n econml310 python main.py --dataset physionet --dataset-config-csv configs/physionet-global-variables.csv --latent-tags-dir /path/to/voter_csvs --dataset-pkl-path /path/to/physionet2012_ts_oc_ids.pkl --output-dir /path/to/main_run`
+- Example: `conda run -n econml310 python main.py --dataset physionet --dataset-config-csv configs/physionet-global-variables.csv --latent-tags-dir /path/to/voter_csvs --dataset-pkl-path /path/to/physionet2012_ts_oc_ids.pkl --output-dir /path/to/main_run --model-type CausalForest`
 
 ### `scripts/run_main.sh`
 
@@ -104,8 +104,8 @@ Run examples from the repository root unless the entry says otherwise. Project P
 
 ### `src/cate_estimation.py`
 
-- Purpose: Estimate treatment effects with `CausalForestDML` or `LinearDML` using DAG-guided confounders.
-- Inputs: Latent tags CSV, processed dataset pickle, graph pickle, optional model/config flags.
+- Purpose: Estimate treatment effects with `CausalForestDML`, `LinearDML`, or `CausalPFN` using DAG-guided confounders.
+- Inputs: Latent tags CSV, processed dataset pickle, graph pickle, optional model/config flags including `--model-type {CausalForest,LinearDML,CausalPFN}`.
 - Outputs: Per-treatment CATE outputs, saved model pickles, and run-level summary/control CSVs.
 - Example: `conda run -n econml310 python src/cate_estimation.py --model physionet --latent-tags-path /path/to/latent_tags.csv --dataset-pkl-path /path/to/physionet2012_ts_oc_ids.pkl --graph-pkl-path /path/to/causal_graph.pkl --output-dir /path/to/cate_outputs --model-type CausalForest`
 
