@@ -830,7 +830,7 @@ def main():
     latent_tags_df, decision_trees = run_latent_tagging_pipeline(pkl_path, output_csv_path)
     print(latent_tags_df.head())
 
-    trees_path = output_csv_path.replace(".csv", "_trees.pkl")
+    trees_path = os.path.join(os.path.dirname(output_csv_path) or ".", "latent_decision_trees.pkl")
     with open(trees_path, "wb") as f:
         pickle.dump(decision_trees, f)
 
