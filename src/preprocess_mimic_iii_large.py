@@ -21,6 +21,10 @@ OUTPUT_PATH = '../data/processed/mimic_iii_ts_oc_ids.pkl'
 TOTAL_STAGES = 10
 
 
+def log_stage(stage: int, message: str) -> None:
+    print(f"[{stage}] {message}", flush=True)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Preprocess raw MIMIC-III ICU files.")
     parser.add_argument("--dataset-config-csv", default=None)
