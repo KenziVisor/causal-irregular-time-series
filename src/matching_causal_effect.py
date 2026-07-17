@@ -22,12 +22,18 @@ import numpy as np
 import pandas as pd
 from dataset_config import (
     get_config_bool,
-    get_config_int,
     get_config_list,
     get_config_scalar,
     load_dataset_config,
+    resolve_config_seed,
 )
-from preprocess_mimic_iii_large_contract import canonicalize_stay_id_series
+from preprocess_mimic_iii_large_contract import (
+    assert_exact_id_cohort,
+    canonicalize_binary_mortality_series,
+    canonicalize_cohort_id_series,
+    canonicalize_mimic_id_series,
+    canonicalize_unique_id_frame,
+)
 
 
 # ============================================================
@@ -199,7 +205,10 @@ def load_analysis_dataframe(
     physionet_pkl_path: str,
 ) -> pd.DataFrame:
     print(f"[load_analysis_dataframe] Loading latent tags from: {latent_tags_path}")
-    latent_df = pd.read_csv(latent_tags_path)
+    latent_df = pd.read_csv(
+        latent_tags_path,
+        dtype={"ts_id": "string", "icustay_id": "string"},
+    )
     if "ts_id" in latent_df.columns:
         latent_df = latent_df.copy()
     elif DATASET_MODEL == "mimic" and "icustay_id" in latent_df.columns:
@@ -209,20 +218,44 @@ def load_analysis_dataframe(
             "Latent tags CSV must contain 'ts_id', or contain 'icustay_id' when "
             f"--model mimic is used. Source: {latent_tags_path}"
         )
-    latent_df["ts_id"] = canonicalize_stay_id_series(latent_df["ts_id"])
-    if latent_df["ts_id"].isna().any():
-        raise ValueError("Latent tags contain missing ts_id values after canonicalization.")
+    latent_df = canonicalize_unique_id_frame(
+        latent_df,
+        frame_name="latent tags",
+    )
 
     print(f"[load_analysis_dataframe] Loading processed pickle from: {physionet_pkl_path}")
-    ts, oc, _ = load_physionet_pickle(physionet_pkl_path)
+    ts, oc, ts_ids = load_physionet_pickle(physionet_pkl_path)
     ts = ts.copy()
-    ts["ts_id"] = canonicalize_stay_id_series(ts["ts_id"])
-    if ts["ts_id"].isna().any():
-        raise ValueError("Processed pickle ts contains missing ts_id values after canonicalization.")
-    oc = oc.copy()
-    oc["ts_id"] = canonicalize_stay_id_series(oc["ts_id"])
-    if oc["ts_id"].isna().any():
-        raise ValueError("Processed pickle oc contains missing ts_id values after canonicalization.")
+    ts["ts_id"] = canonicalize_mimic_id_series(
+        ts["ts_id"],
+        field_name="processed ts.ts_id",
+    )
+    oc = canonicalize_unique_id_frame(
+        oc,
+        frame_name="processed outcomes",
+    )
+    processed_ids = canonicalize_cohort_id_series(
+        ts_ids,
+        cohort_name="processed ts_ids",
+    )
+    assert_exact_id_cohort(
+        processed_ids,
+        pd.Series(ts["ts_id"].unique(), dtype="object"),
+        reference_name="processed ts_ids",
+        candidate_name="processed ts",
+    )
+    assert_exact_id_cohort(
+        processed_ids,
+        oc["ts_id"],
+        reference_name="processed ts_ids",
+        candidate_name="processed outcomes",
+    )
+    assert_exact_id_cohort(
+        processed_ids,
+        latent_df["ts_id"],
+        reference_name="processed ts_ids",
+        candidate_name="latent tags",
+    )
     if OUTCOME_COL not in oc.columns:
         raise ValueError(
             f"Processed pickle is missing outcome column '{OUTCOME_COL}'. "
@@ -232,19 +265,21 @@ def load_analysis_dataframe(
     if OUTCOME_COL in latent_df.columns:
         latent_df = latent_df.drop(columns=[OUTCOME_COL])
 
-    oc_small = oc[["ts_id", OUTCOME_COL]].copy().drop_duplicates(subset=["ts_id"])
-    oc_small["ts_id"] = canonicalize_stay_id_series(oc_small["ts_id"])
-    if oc_small["ts_id"].isna().any():
-        raise ValueError("Processed pickle oc_small contains missing ts_id values after canonicalization.")
+    oc_small = oc[["ts_id", OUTCOME_COL]].copy()
+    oc_small[OUTCOME_COL] = canonicalize_binary_mortality_series(
+        oc_small[OUTCOME_COL],
+        field_name=f"processed outcomes.{OUTCOME_COL}",
+    )
 
     bg_df = build_background_features(
         ts,
         dataset_model=DATASET_MODEL,
         background_feature_columns=BACKGROUND_FEATURE_COLUMNS,
     )
-    bg_df["ts_id"] = canonicalize_stay_id_series(bg_df["ts_id"])
-    if bg_df["ts_id"].isna().any():
-        raise ValueError("Background features contain missing ts_id values after canonicalization.")
+    bg_df = canonicalize_unique_id_frame(
+        bg_df,
+        frame_name="background features",
+    )
 
     latent_bg_overlap = [
         column for column in bg_df.columns
@@ -253,24 +288,24 @@ def load_analysis_dataframe(
     if latent_bg_overlap:
         latent_df = latent_df.drop(columns=latent_bg_overlap)
 
-    overlapping_ids = set(latent_df["ts_id"].dropna().tolist()) & set(oc_small["ts_id"].dropna().tolist())
-    if oc_small.empty or not overlapping_ids:
-        if DATASET_MODEL == "mimic":
-            raise ValueError(
-                "Processed MIMIC pickle and latent tags are misaligned: there are no "
-                "overlapping ts_id values between latent tags and oc. A known cause is "
-                "float-style stay identifiers such as '12345.0' versus '12345'."
-            )
-        raise ValueError(
-            "Processed pickle and latent tags are misaligned: there are no overlapping "
-            "ts_id values between latent tags and oc."
-        )
-
-    df = latent_df.merge(oc_small, on="ts_id", how="inner")
-    df = df.merge(bg_df, on="ts_id", how="left")
-
-    df = df.dropna(subset=[OUTCOME_COL]).copy()
-    df[OUTCOME_COL] = df[OUTCOME_COL].astype(int)
+    df = latent_df.merge(
+        oc_small,
+        on="ts_id",
+        how="inner",
+        validate="one_to_one",
+    )
+    if len(df) != len(latent_df):
+        raise AssertionError("The outcome merge changed the validated latent cohort row count.")
+    df = df.merge(
+        bg_df,
+        on="ts_id",
+        how="left",
+        validate="one_to_one",
+    )
+    df[OUTCOME_COL] = canonicalize_binary_mortality_series(
+        df[OUTCOME_COL],
+        field_name=f"analysis dataframe.{OUTCOME_COL}",
+    )
     print(
         f"[load_analysis_dataframe] Built analysis dataframe: shape={df.shape} | "
         f"outcome_rate={df[OUTCOME_COL].mean():.4f}"
@@ -1087,7 +1122,7 @@ def main():
     BACKGROUND_FEATURE_COLUMNS = list(
         get_config_list(config, "BACKGROUND_FEATURE_COLUMNS", BACKGROUND_FEATURE_COLUMNS) or []
     )
-    SEED = int(get_config_int(config, "SEED", SEED) or SEED)
+    SEED = resolve_config_seed(config, SEED)
     DOWN_SAMPLE = bool(get_config_bool(config, "DOWN_SAMPLE", DOWN_SAMPLE))
     USE_EXPANDED_SAFE_CONFOUNDERS = bool(
         get_config_bool(

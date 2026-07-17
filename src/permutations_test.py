@@ -24,6 +24,13 @@ from dataset_config import (
     get_config_scalar,
     load_dataset_config,
 )
+from preprocess_mimic_iii_large_contract import (
+    assert_exact_id_cohort,
+    canonicalize_binary_mortality_series,
+    canonicalize_cohort_id_series,
+    canonicalize_mimic_id_series,
+    canonicalize_unique_id_frame,
+)
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -298,8 +305,57 @@ def extract_summary_metrics(summary_csv_path: str) -> pd.DataFrame:
     return summary_df
 
 
-def load_latent_tags_dataframe(latent_tags_path: str) -> pd.DataFrame:
-    latent_df = pd.read_csv(latent_tags_path)
+def load_validated_processed_payload(
+    physionet_pkl_path: str,
+) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+    with open(physionet_pkl_path, "rb") as handle:
+        ts, oc, ts_ids = pickle.load(handle)
+
+    ts = ts.copy()
+    ts["ts_id"] = canonicalize_mimic_id_series(
+        ts["ts_id"],
+        field_name="processed ts.ts_id",
+    )
+    oc = canonicalize_unique_id_frame(
+        oc,
+        frame_name="processed outcomes",
+    )
+    processed_ids = canonicalize_cohort_id_series(
+        ts_ids,
+        cohort_name="processed ts_ids",
+    )
+    assert_exact_id_cohort(
+        processed_ids,
+        pd.Series(ts["ts_id"].unique(), dtype="object"),
+        reference_name="processed ts_ids",
+        candidate_name="processed ts",
+    )
+    assert_exact_id_cohort(
+        processed_ids,
+        oc["ts_id"],
+        reference_name="processed ts_ids",
+        candidate_name="processed outcomes",
+    )
+    if OUTCOME_COL not in oc.columns:
+        raise ValueError(
+            f"Outcome column {OUTCOME_COL!r} was not found in the processed pickle: "
+            f"{physionet_pkl_path}"
+        )
+    oc[OUTCOME_COL] = canonicalize_binary_mortality_series(
+        oc[OUTCOME_COL],
+        field_name=f"processed outcomes.{OUTCOME_COL}",
+    )
+    return ts, oc, processed_ids.tolist()
+
+
+def load_latent_tags_dataframe(
+    latent_tags_path: str,
+    physionet_pkl_path: str | None = None,
+) -> pd.DataFrame:
+    latent_df = pd.read_csv(
+        latent_tags_path,
+        dtype={"ts_id": "string", "icustay_id": "string"},
+    )
     if "ts_id" in latent_df.columns:
         latent_df = latent_df.copy()
     elif DATASET_MODEL == "mimic" and "icustay_id" in latent_df.columns:
@@ -309,7 +365,18 @@ def load_latent_tags_dataframe(latent_tags_path: str) -> pd.DataFrame:
             "Latent tags CSV must contain 'ts_id', or contain 'icustay_id' when "
             f"--model mimic is used. Source: {latent_tags_path}"
         )
-    latent_df["ts_id"] = latent_df["ts_id"].astype(str)
+    latent_df = canonicalize_unique_id_frame(
+        latent_df,
+        frame_name="latent tags",
+    )
+    if physionet_pkl_path is not None:
+        _, _, processed_ids = load_validated_processed_payload(physionet_pkl_path)
+        assert_exact_id_cohort(
+            processed_ids,
+            latent_df["ts_id"],
+            reference_name="processed ts_ids",
+            candidate_name="latent tags",
+        )
     return latent_df
 
 
@@ -415,14 +482,7 @@ def shuffle_outcome_column(
     destination_pkl_path: str,
     rng: np.random.Generator,
 ) -> None:
-    with open(physionet_pkl_path, "rb") as f:
-        ts, oc, ts_ids = pickle.load(f)
-
-    if OUTCOME_COL not in oc.columns:
-        raise ValueError(
-            f"Outcome column {OUTCOME_COL!r} was not found in the processed pickle: "
-            f"{physionet_pkl_path}"
-        )
+    ts, oc, ts_ids = load_validated_processed_payload(physionet_pkl_path)
 
     shuffled_oc = oc.copy()
     shuffled_oc[OUTCOME_COL] = rng.permutation(
@@ -534,7 +594,10 @@ def run_treatment_permutation_experiment(
     baseline_metrics_map: Dict[str, Dict[str, float | str]],
     baseline_treatments: Sequence[str],
 ) -> pd.DataFrame:
-    latent_df = load_latent_tags_dataframe(latent_tags_path)
+    latent_df = load_latent_tags_dataframe(
+        latent_tags_path,
+        physionet_pkl_path,
+    )
 
     missing_treatment_cols = [t for t in baseline_treatments if t not in latent_df.columns]
     if missing_treatment_cols:
@@ -639,6 +702,7 @@ def run_outcome_permutation_experiment(
     baseline_metrics_map: Dict[str, Dict[str, float | str]],
     baseline_treatments: Sequence[str],
 ) -> pd.DataFrame:
+    load_latent_tags_dataframe(latent_tags_path, physionet_pkl_path)
     permuted_values_by_treatment = {
         treatment: {
             "mean_cate": [],

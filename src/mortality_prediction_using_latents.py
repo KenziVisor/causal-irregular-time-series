@@ -24,11 +24,23 @@ from sklearn.linear_model import LogisticRegression
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
+from runtime_determinism import (
+    configure_deterministic_runtime,
+    resolve_device_request,
+    select_torch_device,
+)
 
 from dataset_config import (
-    get_config_int,
     get_config_scalar,
     load_dataset_config,
+    resolve_config_seed,
+)
+from preprocess_mimic_iii_large_contract import (
+    assert_exact_id_cohort,
+    canonicalize_binary_mortality_series,
+    canonicalize_cohort_id_series,
+    canonicalize_mimic_id_series,
+    canonicalize_unique_id_frame,
 )
 
 
@@ -72,6 +84,15 @@ def parse_args():
     )
     parser.add_argument("--results-txt-path", default=None)
     parser.add_argument(
+        "--device",
+        choices=["auto", "cpu", "cuda"],
+        default=None,
+        help=(
+            "MLP device request. Resolution: CLI, then "
+            "CLINICAUSE_MORTALITY_DEVICE, then auto."
+        ),
+    )
+    parser.add_argument(
         "--validate-config-only",
         action="store_true",
         help="Resolve dataset config values and exit without loading data.",
@@ -110,7 +131,10 @@ def resolve_output_path(
 def load_latents_and_outcomes(latent_tags_csv_path: str, physionet_ts_oc_ids_pkl_path: str) -> pd.DataFrame:
     print(f"[1/5] Loading latent tags from: {latent_tags_csv_path}")
     # latent tags
-    latent_df = pd.read_csv(latent_tags_csv_path)
+    latent_df = pd.read_csv(
+        latent_tags_csv_path,
+        dtype={"ts_id": "string", "icustay_id": "string"},
+    )
     print(f"      Loaded latent tags: {latent_df.shape[0]:,} rows, {latent_df.shape[1]} columns")
     if "ts_id" in latent_df.columns:
         latent_df = latent_df.copy()
@@ -121,12 +145,48 @@ def load_latents_and_outcomes(latent_tags_csv_path: str, physionet_ts_oc_ids_pkl
             "Latent tags CSV must contain 'ts_id', or contain 'icustay_id' when "
             f"--model mimic is used. Source: {latent_tags_csv_path}"
         )
+    latent_df = canonicalize_unique_id_frame(
+        latent_df,
+        frame_name="latent tags",
+    )
 
     print(f"[2/5] Loading processed outcomes from: {physionet_ts_oc_ids_pkl_path}")
     # outcomes (from your preprocess pickle)
     with open(physionet_ts_oc_ids_pkl_path, "rb") as f:
         ts, oc, ts_ids = pickle.load(f)
     print(f"      Loaded processed pickle: ts rows={len(ts):,}, oc rows={len(oc):,}, patients={len(ts_ids):,}")
+
+    ts = ts.copy()
+    ts["ts_id"] = canonicalize_mimic_id_series(
+        ts["ts_id"],
+        field_name="processed ts.ts_id",
+    )
+    oc = canonicalize_unique_id_frame(
+        oc,
+        frame_name="processed outcomes",
+    )
+    processed_ids = canonicalize_cohort_id_series(
+        ts_ids,
+        cohort_name="processed ts_ids",
+    )
+    assert_exact_id_cohort(
+        processed_ids,
+        pd.Series(ts["ts_id"].unique(), dtype="object"),
+        reference_name="processed ts_ids",
+        candidate_name="processed ts",
+    )
+    assert_exact_id_cohort(
+        processed_ids,
+        oc["ts_id"],
+        reference_name="processed ts_ids",
+        candidate_name="processed outcomes",
+    )
+    assert_exact_id_cohort(
+        processed_ids,
+        latent_df["ts_id"],
+        reference_name="processed ts_ids",
+        candidate_name="latent tags",
+    )
 
     # keep only what we need
     if OUTCOME_COL not in oc.columns:
@@ -135,18 +195,35 @@ def load_latents_and_outcomes(latent_tags_csv_path: str, physionet_ts_oc_ids_pkl
             f"Available oc columns: {list(oc.columns)}"
         )
     oc_small = oc[["ts_id", OUTCOME_COL]].copy()
+    oc_small[OUTCOME_COL] = canonicalize_binary_mortality_series(
+        oc_small[OUTCOME_COL],
+        field_name=f"processed outcomes.{OUTCOME_COL}",
+    )
+    if OUTCOME_COL in latent_df.columns:
+        latent_df = latent_df.drop(columns=[OUTCOME_COL])
 
     print("[3/5] Merging latent tags with outcome labels")
-    # merge
-    latent_df["ts_id"] = latent_df["ts_id"].astype(str)
-    oc_small["ts_id"] = oc_small["ts_id"].astype(str)
-    df = latent_df.merge(oc_small, on="ts_id", how="inner")
+    df = latent_df.merge(
+        oc_small,
+        on="ts_id",
+        how="inner",
+        validate="one_to_one",
+    )
+    if len(df) != len(latent_df):
+        raise ValueError(
+            "Latent/outcome merge changed the validated cohort row count."
+        )
 
     # sanity
     if df[OUTCOME_COL].isna().any():
-        df = df.dropna(subset=[OUTCOME_COL])
+        raise ValueError(
+            "Latent/outcome merge produced a missing mortality outcome."
+        )
 
-    df[OUTCOME_COL] = df[OUTCOME_COL].astype(int)
+    df[OUTCOME_COL] = canonicalize_binary_mortality_series(
+        df[OUTCOME_COL],
+        field_name=OUTCOME_COL,
+    )
     print(f"      Finished merge: {len(df):,} patients retained")
     return df
 
@@ -236,11 +313,23 @@ def predict_probs(model, loader, device):
     return np.concatenate(ys), np.concatenate(probs)
 
 
-def train_mlp(X_train, y_train, X_val, y_val, seed=42, epochs=50, batch_size=256, lr=1e-3):
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+def train_mlp(
+    X_train,
+    y_train,
+    X_val,
+    y_val,
+    seed=42,
+    epochs=50,
+    batch_size=256,
+    lr=1e-3,
+    device_request="auto",
+):
+    device = select_torch_device(device_request, torch_module=torch)
+    configure_deterministic_runtime(
+        seed,
+        torch_module=torch,
+        seed_cuda=device == "cuda",
+    )
     print(
         f"[5/5] Training MLP on device={device} | epochs={epochs} | "
         f"batch_size={batch_size} | train_rows={len(y_train):,} | val_rows={len(y_val):,}"
@@ -308,6 +397,7 @@ def run_mortality_from_latents(
     test_size: float = 0.2,
     val_size: float = 0.2,
     seed: int = 42,
+    device_request: str = "auto",
 ):
     print("=== Starting mortality prediction from latent tags ===")
     df = load_latents_and_outcomes(latent_tags_csv_path, physionet_ts_oc_ids_pkl_path)
@@ -345,7 +435,14 @@ def run_mortality_from_latents(
     print("[LogReg] TEST:", test_metrics_lr)
 
     # --- MLP ---
-    mlp, val_metrics_mlp, device = train_mlp(X_train_s, y_train, X_val_s, y_val, seed=seed)
+    mlp, val_metrics_mlp, device = train_mlp(
+        X_train_s,
+        y_train,
+        X_val_s,
+        y_val,
+        seed=seed,
+        device_request=device_request,
+    )
     test_loader = DataLoader(TabDataset(X_test_s, y_test), batch_size=512, shuffle=False)
     yt_true, yt_prob = predict_probs(mlp, test_loader, device)
     test_metrics_mlp = evaluate_probs(yt_true, yt_prob)
@@ -401,7 +498,12 @@ def main():
     DATASET_MODEL = args.model
     config = load_dataset_config(DATASET_MODEL, args.dataset_config_csv)
     OUTCOME_COL = str(get_config_scalar(config, "OUTCOME_COL", OUTCOME_COL))
-    seed = int(get_config_int(config, "SEED", SEED) or SEED)
+    seed = resolve_config_seed(config, SEED)
+    device_request, device_source = resolve_device_request(
+        args.device,
+        get_config_scalar(config, "MORTALITY_DEVICE", None),
+        environ=os.environ,
+    )
 
     latent_path = resolve_runtime_path(
         args.latent_tags_path,
@@ -421,13 +523,15 @@ def main():
     print(
         "Runtime configuration: "
         f"model={DATASET_MODEL} | latent_tags_path={latent_path} | "
-        f"processed_pkl_path={physionet_pkl_path} | results_txt_path={results_path}"
+        f"processed_pkl_path={physionet_pkl_path} | results_txt_path={results_path} | "
+        f"mortality_device_request={device_request} | device_source={device_source}"
     )
     return run_mortality_from_latents(
         latent_path,
         physionet_pkl_path,
         results_path,
         seed=seed,
+        device_request=device_request,
     )
 
 

@@ -20,6 +20,7 @@ from src.dataset_config import (
     print_resolved_config_summary,
     validate_script_config,
 )
+from src.runtime_determinism import resolve_routed_mortality_device
 
 
 STATUS_PENDING = "pending"
@@ -76,6 +77,9 @@ class RunContext:
     config: dict[str, object]
     model_type: str
     trials: int
+    mortality_device_requested: str
+    mortality_device: str
+    mortality_device_source: str
     latent_tags_dir: Path
     dataset_pkl_path: Path
     stages: dict[str, StageRecord]
@@ -120,6 +124,15 @@ def parse_args() -> argparse.Namespace:
         choices=MODEL_TYPE_CHOICES,
         default=None,
         help="Override MODEL_TYPE from the dataset config for this orchestrated run.",
+    )
+    parser.add_argument(
+        "--mortality-device",
+        choices=["auto", "cpu", "cuda"],
+        default=None,
+        help=(
+            "Device for the background mortality MLP. CausalPFN routes auto to CPU "
+            "and rejects CUDA overlap."
+        ),
     )
     parser.add_argument(
         "--validate-config-only",
@@ -184,6 +197,11 @@ def build_run_context(args: argparse.Namespace) -> RunContext:
         args.model_type
         if args.model_type is not None
         else get_config_scalar(config, "MODEL_TYPE", "CausalForest")
+    )
+    mortality_device_requested = args.mortality_device or "auto"
+    mortality_device, mortality_device_source = resolve_routed_mortality_device(
+        model_type,
+        mortality_device_requested,
     )
     trials = get_config_int(config, "TRIALS", 10)
     if trials is None:
@@ -348,6 +366,9 @@ def build_run_context(args: argparse.Namespace) -> RunContext:
         config=config,
         model_type=model_type,
         trials=trials,
+        mortality_device_requested=mortality_device_requested,
+        mortality_device=mortality_device,
+        mortality_device_source=mortality_device_source,
         latent_tags_dir=latent_tags_dir,
         dataset_pkl_path=Path(dataset_pkl_value).expanduser().resolve(),
         stages=stages,
@@ -363,6 +384,9 @@ def validate_config_only(args: argparse.Namespace, context: RunContext) -> None:
     resolved = validate_script_config("main.py", context.config)
     print_resolved_config_summary("main.py", context.config, resolved)
     print(f"  effective_MODEL_TYPE: {context.model_type}")
+    print(f"  mortality_device_requested: {context.mortality_device_requested}")
+    print(f"  mortality_device_effective: {context.mortality_device}")
+    print(f"  mortality_device_source: {context.mortality_device_source}")
 
     if args.latent_tags_dir is not None:
         resolve_directory_path(str(context.latent_tags_dir), "latent-tags dir")
@@ -642,6 +666,8 @@ def build_mortality_command(context: RunContext) -> list[str]:
         str(context.dataset_pkl_path),
         "--results-txt-path",
         stage.output_paths["results_txt"],
+        "--device",
+        context.mortality_device,
     ]
 
 
@@ -773,6 +799,10 @@ def write_run_summary(
         "output_root": str(context.output_root),
         "dataset": context.dataset,
         "dataset_config_csv": str(context.dataset_config_csv),
+        "model_type": context.model_type,
+        "mortality_device_requested": context.mortality_device_requested,
+        "mortality_device_effective": context.mortality_device,
+        "mortality_device_source": context.mortality_device_source,
         "latent_tags_dir": str(context.latent_tags_dir),
         "dataset_pkl_path": str(context.dataset_pkl_path),
         "stages": {

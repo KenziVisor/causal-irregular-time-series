@@ -30,10 +30,17 @@ import pandas as pd
 from econml.dml import CausalForestDML, LinearDML
 from dataset_config import (
     get_config_bool,
-    get_config_int,
     get_config_list,
     get_config_scalar,
     load_dataset_config,
+    resolve_config_seed,
+)
+from preprocess_mimic_iii_large_contract import (
+    assert_exact_id_cohort,
+    canonicalize_binary_mortality_series,
+    canonicalize_cohort_id_series,
+    canonicalize_mimic_id_series,
+    canonicalize_unique_id_frame,
 )
 from scipy.stats import norm
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
@@ -334,7 +341,10 @@ def load_analysis_dataframe(
     latent_tags_path: Path,
     physionet_pkl_path: Path,
 ) -> pd.DataFrame:
-    latent_df = pd.read_csv(latent_tags_path)
+    latent_df = pd.read_csv(
+        latent_tags_path,
+        dtype={"ts_id": "string", "icustay_id": "string"},
+    )
     if "ts_id" in latent_df.columns:
         latent_df = latent_df.copy()
     elif DATASET_MODEL == "mimic" and "icustay_id" in latent_df.columns:
@@ -344,9 +354,43 @@ def load_analysis_dataframe(
             "Latent tags CSV must contain 'ts_id', or contain 'icustay_id' when "
             f"--model mimic is used. Source: {latent_tags_path}"
         )
-    latent_df["ts_id"] = latent_df["ts_id"].astype(str)
+    latent_df = canonicalize_unique_id_frame(
+        latent_df,
+        frame_name="latent tags",
+    )
 
-    ts, oc, _ = load_physionet_pickle(physionet_pkl_path)
+    ts, oc, ts_ids = load_physionet_pickle(physionet_pkl_path)
+    ts = ts.copy()
+    ts["ts_id"] = canonicalize_mimic_id_series(
+        ts["ts_id"],
+        field_name="processed ts.ts_id",
+    )
+    oc = canonicalize_unique_id_frame(
+        oc,
+        frame_name="processed outcomes",
+    )
+    processed_ids = canonicalize_cohort_id_series(
+        ts_ids,
+        cohort_name="processed ts_ids",
+    )
+    assert_exact_id_cohort(
+        processed_ids,
+        pd.Series(ts["ts_id"].unique(), dtype="object"),
+        reference_name="processed ts_ids",
+        candidate_name="processed ts",
+    )
+    assert_exact_id_cohort(
+        processed_ids,
+        oc["ts_id"],
+        reference_name="processed ts_ids",
+        candidate_name="processed outcomes",
+    )
+    assert_exact_id_cohort(
+        processed_ids,
+        latent_df["ts_id"],
+        reference_name="processed ts_ids",
+        candidate_name="latent tags",
+    )
     if OUTCOME_COL not in oc.columns:
         raise ValueError(
             f"Processed pickle is missing outcome column '{OUTCOME_COL}'. "
@@ -356,15 +400,21 @@ def load_analysis_dataframe(
     if OUTCOME_COL in latent_df.columns:
         latent_df = latent_df.drop(columns=[OUTCOME_COL])
 
-    oc_small = oc[["ts_id", OUTCOME_COL]].copy().drop_duplicates(subset=["ts_id"])
-    oc_small["ts_id"] = oc_small["ts_id"].astype(str)
+    oc_small = oc[["ts_id", OUTCOME_COL]].copy()
+    oc_small[OUTCOME_COL] = canonicalize_binary_mortality_series(
+        oc_small[OUTCOME_COL],
+        field_name=f"processed outcomes.{OUTCOME_COL}",
+    )
 
     bg_df = build_background_features(
         ts,
         dataset_model=DATASET_MODEL,
         background_feature_columns=BACKGROUND_FEATURE_COLUMNS,
     )
-    bg_df["ts_id"] = bg_df["ts_id"].astype(str)
+    bg_df = canonicalize_unique_id_frame(
+        bg_df,
+        frame_name="background features",
+    )
 
     latent_bg_overlap = [
         column for column in bg_df.columns
@@ -373,10 +423,24 @@ def load_analysis_dataframe(
     if latent_bg_overlap:
         latent_df = latent_df.drop(columns=latent_bg_overlap)
 
-    df = latent_df.merge(oc_small, on="ts_id", how="inner")
-    df = df.merge(bg_df, on="ts_id", how="left")
-    df = df.dropna(subset=[OUTCOME_COL]).copy()
-    df[OUTCOME_COL] = df[OUTCOME_COL].astype(int)
+    df = latent_df.merge(
+        oc_small,
+        on="ts_id",
+        how="inner",
+        validate="one_to_one",
+    )
+    if len(df) != len(latent_df):
+        raise AssertionError("The outcome merge changed the validated latent cohort row count.")
+    df = df.merge(
+        bg_df,
+        on="ts_id",
+        how="left",
+        validate="one_to_one",
+    )
+    df[OUTCOME_COL] = canonicalize_binary_mortality_series(
+        df[OUTCOME_COL],
+        field_name=f"analysis dataframe.{OUTCOME_COL}",
+    )
     return df
 
 
@@ -2526,7 +2590,7 @@ def main() -> None:
     PREFERRED_ENV_NAME = str(
         get_config_scalar(config, "PREFERRED_ENV_NAME", PREFERRED_ENV_NAME)
     )
-    SEED = int(get_config_int(config, "SEED", SEED) or SEED)
+    SEED = resolve_config_seed(config, SEED)
     SAVE_CONTOUR_PLOT = bool(
         get_config_bool(config, "SAVE_CONTOUR_PLOT", SAVE_CONTOUR_PLOT)
     )

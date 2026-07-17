@@ -27,14 +27,21 @@ import pandas as pd
 from econml.dml import CausalForestDML, LinearDML
 from dataset_config import (
     get_config_bool,
-    get_config_int,
     get_config_list,
     get_config_scalar,
     load_dataset_config,
+    resolve_config_seed,
     resolve_with_precedence,
 )
-from preprocess_mimic_iii_large_contract import canonicalize_stay_id_series
+from preprocess_mimic_iii_large_contract import (
+    assert_exact_id_cohort,
+    canonicalize_binary_mortality_series,
+    canonicalize_cohort_id_series,
+    canonicalize_mimic_id_series,
+    canonicalize_unique_id_frame,
+)
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from runtime_determinism import configure_deterministic_runtime
 
 
 # ============================================================
@@ -791,7 +798,10 @@ def load_analysis_dataframe(
     model: str | None = None,
 ) -> pd.DataFrame:
     current_model = DATASET_MODEL if model is None else model
-    latent_df = pd.read_csv(latent_tags_path)
+    latent_df = pd.read_csv(
+        latent_tags_path,
+        dtype={"ts_id": "string", "icustay_id": "string"},
+    )
     log_dataframe_columns("latent_df_raw", latent_df)
 
     if "ts_id" in latent_df.columns:
@@ -803,9 +813,10 @@ def load_analysis_dataframe(
             "Latent tags CSV must contain 'ts_id', or contain 'icustay_id' when "
             f"--model mimic is used. Source: {latent_tags_path}"
         )
-    latent_df["ts_id"] = canonicalize_stay_id_series(latent_df["ts_id"])
-    if latent_df["ts_id"].isna().any():
-        raise ValueError("Latent tags contain missing ts_id values after canonicalization.")
+    latent_df = canonicalize_unique_id_frame(
+        latent_df,
+        frame_name="latent tags",
+    )
     latent_df = normalize_expected_columns(
         latent_df,
         list(TREATMENTS),
@@ -813,15 +824,38 @@ def load_analysis_dataframe(
     )
     log_dataframe_columns("latent_df_normalized", latent_df)
 
-    ts, oc, _ = load_physionet_pickle(physionet_pkl_path)
+    ts, oc, ts_ids = load_physionet_pickle(physionet_pkl_path)
     ts = ts.copy()
-    ts["ts_id"] = canonicalize_stay_id_series(ts["ts_id"])
-    if ts["ts_id"].isna().any():
-        raise ValueError("Processed pickle ts contains missing ts_id values after canonicalization.")
-    oc = oc.copy()
-    oc["ts_id"] = canonicalize_stay_id_series(oc["ts_id"])
-    if oc["ts_id"].isna().any():
-        raise ValueError("Processed pickle oc contains missing ts_id values after canonicalization.")
+    ts["ts_id"] = canonicalize_mimic_id_series(
+        ts["ts_id"],
+        field_name="processed ts.ts_id",
+    )
+    oc = canonicalize_unique_id_frame(
+        oc,
+        frame_name="processed outcomes",
+    )
+    processed_ids = canonicalize_cohort_id_series(
+        ts_ids,
+        cohort_name="processed ts_ids",
+    )
+    assert_exact_id_cohort(
+        processed_ids,
+        pd.Series(ts["ts_id"].unique(), dtype="object"),
+        reference_name="processed ts_ids",
+        candidate_name="processed ts",
+    )
+    assert_exact_id_cohort(
+        processed_ids,
+        oc["ts_id"],
+        reference_name="processed ts_ids",
+        candidate_name="processed outcomes",
+    )
+    assert_exact_id_cohort(
+        processed_ids,
+        latent_df["ts_id"],
+        reference_name="processed ts_ids",
+        candidate_name="latent tags",
+    )
     if OUTCOME_COL not in oc.columns:
         raise ValueError(
             f"Processed pickle is missing outcome column '{OUTCOME_COL}'. "
@@ -836,19 +870,21 @@ def load_analysis_dataframe(
         )
         latent_df = latent_df.drop(columns=[OUTCOME_COL])
 
-    oc_small = oc[["ts_id", OUTCOME_COL]].copy().drop_duplicates(subset=["ts_id"])
-    oc_small["ts_id"] = canonicalize_stay_id_series(oc_small["ts_id"])
-    if oc_small["ts_id"].isna().any():
-        raise ValueError("Processed pickle oc_small contains missing ts_id values after canonicalization.")
+    oc_small = oc[["ts_id", OUTCOME_COL]].copy()
+    oc_small[OUTCOME_COL] = canonicalize_binary_mortality_series(
+        oc_small[OUTCOME_COL],
+        field_name=f"processed outcomes.{OUTCOME_COL}",
+    )
 
     bg_df = build_background_features(
         ts,
         dataset_model=current_model,
         background_feature_columns=BACKGROUND_FEATURE_COLUMNS,
     )
-    bg_df["ts_id"] = canonicalize_stay_id_series(bg_df["ts_id"])
-    if bg_df["ts_id"].isna().any():
-        raise ValueError("Background features contain missing ts_id values after canonicalization.")
+    bg_df = canonicalize_unique_id_frame(
+        bg_df,
+        frame_name="background features",
+    )
     log_dataframe_columns("bg_df", bg_df)
 
     latent_bg_overlap = [
@@ -863,47 +899,29 @@ def load_analysis_dataframe(
         )
         latent_df = latent_df.drop(columns=latent_bg_overlap)
 
-    latent_ids = set(latent_df["ts_id"].dropna().tolist())
-    oc_ids = set(oc_small["ts_id"].dropna().tolist())
-    overlapping_ids = latent_ids & oc_ids
-    only_latent_ids = latent_ids - oc_ids
-    only_oc_ids = oc_ids - latent_ids
-    print("[load_analysis_dataframe] ts_id overlap diagnostics:")
-    print(f"  latent_df unique ids: {len(latent_ids)}")
-    print(f"  oc_small unique ids: {len(oc_ids)}")
-    print(f"  overlapping ids: {len(overlapping_ids)}")
-    print(f"  sample only in latent_df: {sample_ts_ids(only_latent_ids)}")
-    print(f"  sample only in oc_small: {sample_ts_ids(only_oc_ids)}")
-
-    if oc_small.empty or not overlapping_ids:
-        if current_model == "mimic":
-            raise ValueError(
-                "Processed MIMIC pickle and latent tags are misaligned: there are no "
-                "overlapping ts_id values between latent tags and oc. A known cause is "
-                "float-style stay identifiers such as '12345.0' versus '12345'. "
-                "Regenerate the processed MIMIC pickle and then regenerate the MIMIC "
-                "latent tags CSV."
-            )
-        raise ValueError(
-            "Processed pickle and latent tags are misaligned: there are no overlapping "
-            "ts_id values between latent tags and oc."
-        )
-
-    df = latent_df.merge(oc_small, on="ts_id", how="inner")
-    df = df.merge(bg_df, on="ts_id", how="left")
+    df = latent_df.merge(
+        oc_small,
+        on="ts_id",
+        how="inner",
+        validate="one_to_one",
+    )
+    if len(df) != len(latent_df):
+        raise AssertionError("The outcome merge changed the validated latent cohort row count.")
+    df = df.merge(
+        bg_df,
+        on="ts_id",
+        how="left",
+        validate="one_to_one",
+    )
     df = normalize_expected_columns(
         df,
         [OUTCOME_COL, *BACKGROUND_FEATURE_COLUMNS, *TREATMENTS],
         source_name="analysis_df",
     )
 
-    rows_before_outcome_dropna = len(df)
-    df[OUTCOME_COL] = pd.to_numeric(df[OUTCOME_COL], errors="coerce")
-    df = df.dropna(subset=[OUTCOME_COL]).copy()
-    df[OUTCOME_COL] = df[OUTCOME_COL].astype(int)
-    print(
-        "[analysis_df] rows before dropping missing outcomes: "
-        f"{rows_before_outcome_dropna}"
+    df[OUTCOME_COL] = canonicalize_binary_mortality_series(
+        df[OUTCOME_COL],
+        field_name=f"analysis dataframe.{OUTCOME_COL}",
     )
     log_dataframe_columns("analysis_df", df)
     print(f"[analysis_df] shape: {df.shape}")
@@ -2027,6 +2045,8 @@ def fit_one_treatment(
         from causalpfn import CATEEstimator
         import torch
 
+        configure_deterministic_runtime(SEED, torch_module=torch)
+
         causalpfn_feature_columns = list(dict.fromkeys(confounders + effect_modifiers))
         if not causalpfn_feature_columns:
             constant_col = "__causalpfn_constant__"
@@ -2578,7 +2598,7 @@ def main():
     EFFECT_MODIFIER_COLUMNS = list(
         get_config_list(config, "EFFECT_MODIFIER_COLUMNS", EFFECT_MODIFIER_COLUMNS) or []
     )
-    SEED = int(get_config_int(config, "SEED", SEED) or SEED)
+    SEED = resolve_config_seed(config, SEED)
 
     LATENT_TAGS_PATH = resolve_runtime_path(
         args.latent_tags_path,
@@ -2624,6 +2644,7 @@ def main():
         raise ValueError(
             f"Unsupported MODEL_TYPE: {MODEL_TYPE}. Use one of {MODEL_TYPE_CHOICES}."
         )
+    configure_deterministic_runtime(SEED)
 
     warnings.filterwarnings("ignore", category=FutureWarning)
     os.makedirs(OUTPUT_DIR, exist_ok=True)

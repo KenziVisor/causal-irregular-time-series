@@ -9,6 +9,10 @@ from typing import Any
 
 
 DATASET_CHOICES = {"physionet", "mimic"}
+EXPECTED_DATASET_NAMES = {
+    "physionet": "physionet 2012 challenge",
+    "mimic": "mimic iii",
+}
 MODEL_TYPE_CHOICES = {"CausalForest", "LinearDML", "CausalPFN"}
 
 COMPACT_CONFIG_FIELDS = [
@@ -235,6 +239,10 @@ def _validate_header(dataset: str, path: Path, columns: list[str]) -> None:
     )
 
 
+def _normalize_descriptive_dataset_name(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value).casefold()).strip()
+
+
 def _validate_compact_config(config: dict[str, object]) -> None:
     dataset = _config_dataset(config)
     path = _config_path(config)
@@ -249,6 +257,16 @@ def _validate_compact_config(config: dict[str, object]) -> None:
         raise ValueError(
             "Dataset config CSV has empty required compact fields "
             f"({_context_message(dataset, path, '<required>')}): {missing_values}"
+        )
+
+    dataset_name = get_config_scalar(config, "DATASET_NAME", None)
+    normalized_dataset_name = _normalize_descriptive_dataset_name(dataset_name)
+    expected_dataset_name = EXPECTED_DATASET_NAMES.get(dataset)
+    if normalized_dataset_name != expected_dataset_name:
+        raise ValueError(
+            "Dataset config DATASET_NAME does not match the requested dataset "
+            f"({_context_message(dataset, path, 'DATASET_NAME')}): "
+            f"got {dataset_name!r}; expected identity {expected_dataset_name!r}."
         )
 
     model_type = get_config_scalar(config, "MODEL_TYPE", None)
@@ -487,6 +505,11 @@ def get_config_int(
             f"got {value!r}."
         )
     return int(numeric_value)
+
+
+def resolve_config_seed(config: dict[str, object], default_seed: int) -> int:
+    configured_seed = get_config_int(config, "SEED", None)
+    return int(default_seed if configured_seed is None else configured_seed)
 
 
 def get_config_float(

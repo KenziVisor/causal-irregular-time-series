@@ -6,6 +6,8 @@ from typing import Sequence
 
 import pandas as pd
 
+from preprocess_mimic_iii_large_contract import canonicalize_mimic_id_series
+
 
 DEFAULT_OUTPUT_PATH = Path("./latent_tags_majority_vote.csv")
 
@@ -69,7 +71,7 @@ def discover_csv_files(input_dir: Path, output_path: Path) -> list[Path]:
 
 def load_latent_csv(path: Path) -> pd.DataFrame:
     try:
-        df = pd.read_csv(path)
+        df = pd.read_csv(path, dtype=str)
     except Exception as exc:
         raise ValueError(f"Failed to read CSV file: {path} ({exc})") from exc
 
@@ -90,28 +92,19 @@ def load_latent_csv(path: Path) -> pd.DataFrame:
     if "ts_id" not in df.columns:
         raise ValueError(f"CSV file is missing required 'ts_id' column: {path}")
 
-    df["ts_id"] = df["ts_id"].map(lambda value: "" if pd.isna(value) else str(value).strip())
-    empty_ts_id_mask = df["ts_id"] == ""
-    if empty_ts_id_mask.any():
-        first_bad_row = next(
-            row_index for row_index, is_bad in enumerate(empty_ts_id_mask.tolist(), start=1)
-            if is_bad
+    try:
+        df["ts_id"] = canonicalize_mimic_id_series(
+            df["ts_id"],
+            field_name=f"{path}.ts_id",
         )
-        raise ValueError(
-            f"CSV file contains an empty ts_id value after stripping whitespace: {path}. "
-            f"First offending data row={first_bad_row}"
-        )
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"CSV file contains an invalid ts_id value: {path}. {error}") from error
 
     duplicate_mask = df["ts_id"].duplicated(keep=False)
     if duplicate_mask.any():
-        first_duplicate_row = next(
-            row_index for row_index, is_dup in enumerate(duplicate_mask.tolist(), start=1)
-            if is_dup
-        )
-        duplicate_ts_id = df.loc[duplicate_mask, "ts_id"].iloc[0]
         raise ValueError(
-            f"CSV file contains duplicate ts_id values: {path}. "
-            f"First duplicated data row={first_duplicate_row}, ts_id={duplicate_ts_id!r}"
+            f"CSV file contains duplicate ts_id values after canonicalization: {path}. "
+            f"Duplicate row count={int(duplicate_mask.sum())}."
         )
 
     latent_columns = [column for column in df.columns if column != "ts_id"]
@@ -188,41 +181,68 @@ def align_voters_on_shared_ts_ids(
     voter_file_paths: Sequence[Path],
     latent_columns: Sequence[str],
 ) -> tuple[list[pd.DataFrame], list[str], list[int]]:
+    """Prove exact cohort equality, then reorder every voter to the reference."""
     if not voter_dfs:
         raise ValueError("No validated voter dataframes were provided for alignment.")
+    if len(voter_dfs) != len(voter_file_paths):
+        raise ValueError("Each voter dataframe must have one corresponding file path.")
 
     latent_columns = list(latent_columns)
-    shared_ts_ids = set(voter_dfs[0]["ts_id"])
-    for voter_df in voter_dfs[1:]:
-        shared_ts_ids &= set(voter_df["ts_id"])
-
-    if not shared_ts_ids:
-        row_count_details = "; ".join(
-            f"{file_path}={len(voter_df):,} rows"
-            for file_path, voter_df in zip(voter_file_paths, voter_dfs)
+    canonical_voters: list[pd.DataFrame] = []
+    for voter_df, voter_file_path in zip(voter_dfs, voter_file_paths):
+        if "ts_id" not in voter_df.columns:
+            raise ValueError(f"Voter dataframe is missing ts_id: {voter_file_path}")
+        missing_latents = [
+            column for column in latent_columns if column not in voter_df.columns
+        ]
+        if missing_latents:
+            raise ValueError(
+                f"Voter dataframe is missing latent columns: {voter_file_path}. "
+                f"Missing columns={missing_latents}."
+            )
+        canonical_voter = voter_df.loc[:, ["ts_id", *latent_columns]].copy()
+        canonical_voter["ts_id"] = canonicalize_mimic_id_series(
+            canonical_voter["ts_id"],
+            field_name=f"{voter_file_path}.ts_id",
         )
-        raise ValueError(
-            f"No shared ts_id values remain after intersecting {len(voter_dfs)} voter CSV files. "
-            f"Row counts by file: {row_count_details}"
-        )
+        duplicate_mask = canonical_voter["ts_id"].duplicated(keep=False)
+        if duplicate_mask.any():
+            raise ValueError(
+                f"Voter dataframe contains duplicate ts_id values: {voter_file_path}. "
+                f"Duplicate row count={int(duplicate_mask.sum())}."
+            )
+        canonical_voters.append(canonical_voter)
 
-    reference_df = voter_dfs[0]
-    final_ts_ids = [ts_id for ts_id in reference_df["ts_id"] if ts_id in shared_ts_ids]
+    reference_ts_ids = canonical_voters[0]["ts_id"].tolist()
+    if not reference_ts_ids:
+        raise ValueError("Voter cohorts must not be empty.")
+    reference_set = set(reference_ts_ids)
+
+    for voter_index, (voter_df, voter_file_path) in enumerate(
+        zip(canonical_voters[1:], voter_file_paths[1:]),
+        start=2,
+    ):
+        current_set = set(voter_df["ts_id"])
+        missing_count = len(reference_set - current_set)
+        extra_count = len(current_set - reference_set)
+        if missing_count or extra_count:
+            raise ValueError(
+                f"Voter cohort mismatch for voter {voter_index}: {voter_file_path}. "
+                f"missing_count={missing_count}; extra_count={extra_count}."
+            )
 
     aligned_voter_dfs: list[pd.DataFrame] = []
-    dropped_rows_per_voter: list[int] = []
-    for voter_df in voter_dfs:
+    for voter_df in canonical_voters:
         aligned_voter_df = (
             voter_df.set_index("ts_id")
-            .loc[final_ts_ids, latent_columns]
+            .loc[reference_ts_ids, latent_columns]
             .reset_index()
         )
         aligned_voter_dfs.append(
             aligned_voter_df.loc[:, ["ts_id", *latent_columns]].copy()
         )
-        dropped_rows_per_voter.append(len(voter_df) - len(aligned_voter_df))
 
-    return aligned_voter_dfs, final_ts_ids, dropped_rows_per_voter
+    return aligned_voter_dfs, reference_ts_ids, [0] * len(aligned_voter_dfs)
 
 
 def build_majority_vote_dataframe(
@@ -295,34 +315,23 @@ def main() -> None:
                 f"rows before alignment: {len(validated_voter_df):,}"
             )
 
-    print("[4/5] Aligning voters on shared ts_id intersection")
-    aligned_voter_dfs, final_ts_ids, dropped_rows_per_voter = align_voters_on_shared_ts_ids(
+    print("[4/5] Proving exact voter cohort equality")
+    aligned_voter_dfs, final_ts_ids, _ = align_voters_on_shared_ts_ids(
         voter_dfs=voter_dfs,
         voter_file_paths=voter_files,
         latent_columns=reference_latent_columns,
     )
     print(
-        f"Shared ts_id intersection across {len(aligned_voter_dfs)} voters: "
+        f"Identical ts_id cohort across {len(aligned_voter_dfs)} voters: "
         f"{len(final_ts_ids):,}"
     )
-    print(
-        f"Dropped {dropped_rows_per_voter[0]:,} reference-only rows not shared by all voters"
-    )
-    for voter_index, (voter_file, dropped_rows) in enumerate(
-        zip(voter_files[1:], dropped_rows_per_voter[1:]),
-        start=2,
-    ):
-        print(
-            f"Dropped {dropped_rows:,} rows from voter {voter_index}/{len(voter_files)} "
-            f"during alignment: {voter_file}"
-        )
 
     reference_df = aligned_voter_dfs[0]
     voter_dfs = aligned_voter_dfs
 
     print("[5/5] Computing and saving majority vote")
     print(
-        f"Voting across {len(voter_dfs)} files, {len(reference_df):,} shared patients, "
+        f"Voting across {len(voter_dfs)} files, {len(reference_df):,} cohort members, "
         f"{len(reference_latent_columns)} latent columns"
     )
     output_df = build_majority_vote_dataframe(
